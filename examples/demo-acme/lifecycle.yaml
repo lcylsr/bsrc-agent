@@ -1,0 +1,114 @@
+# ============================================================
+# lifecycle.yaml — finding 单一日志（真相源）— 脱敏演示案例
+#
+# 本案例为**虚构目标**（acme 示例甲方），全部资产使用 RFC 5737 文档网段
+# 与 example.com 占位域名，不存在真实目标、真实凭据、真实数据。
+# 用途：展示框架 finding 状态机、验证纪律与交付流程的完整闭环。
+#
+# 状态机（每次变更追加一条 history，当前状态 = history 末条）：
+#   phenomenon → candidate → verified → money_ready → delivered
+# 视图由 `python tools/findings-lint.py examples/demo-acme --lifecycle --gen` 生成
+# ============================================================
+
+target: examples/demo-acme
+mode: src
+created: 2026-08-12
+updated: 2026-08-12
+
+approval_queue: []           # 演示案例已闭环，无待审批项
+
+findings:
+  # ─────────────────────────────────────────────
+  # ACME-F-001 SSRF → 内网配置读取（组合验证升 verified）
+  # ─────────────────────────────────────────────
+  - id: ACME-F-001
+    title: "SSRF：/api/v1/asset-preview?url= 可读取内网管理配置（组合验证证明可做内网探测）"
+    severity: high
+    delivery_order: 1
+    target: api.demo-acme.example.com
+    status: verified
+    status_changed_at: 2026-08-12T18:05:00+08:00
+    last_rechecked: 2026-08-12
+    summary: |
+      资产预览接口 url 参数未校验协议与目标地址，服务端代为请求；单点现象为
+      file:// 与内网地址均可回显。组合验证：经 SSRF 读取 http://10.0.0.10/conf.json
+      返回内网管理网段（10.0.0.0/8）与管理口地址 → 证明 SSRF 可被利用为内网探测入口。
+      GET 只读，未触碰真实业务数据。
+    poc: output/poc-acme-001.py
+    replay_signature: '"内网管理网段": "10.0.0.0/8"'
+    money_ready: true
+    missing: null
+    trigger: null
+    unlock_plan:
+      trigger_what: null
+      channel: null
+      deadline: null
+    evidence:
+      - output/poc-acme-001.py
+      - output/rounds/2026-08-12.md
+    history:
+      - {at: 2026-08-12T15:20:00+08:00, from: phenomenon, to: candidate, note: "url= 参数命中反射第一层，5 payload 一发即中：file:///etc/hosts 与 http://127.0.0.1:8080 均回显，触发物 = 无（技术闭）"}
+      - {at: 2026-08-12T18:05:00+08:00, from: candidate, to: verified, note: "反事实 4 问通过：(1) 改 url 指向不同地址返回不同内容 → 服务端真请求非缓存；(2) 无需认证即触发 → 未授权成立；(3) 假响应反证：换内网不可达地址返回 502 而可达地址返回 200 → 非误报；(4) 证伪反例：假设只是前端 JS 拼接，用绕过浏览器直连脚本重放仍成立 → 无法推翻。组合验证：SSRF 读到 conf.json 内网网段 → 可做内网探测，verified"}
+
+  # ─────────────────────────────────────────────
+  # ACME-F-002 分号路径归一化认证绕过（QES 家族脱敏）
+  # ─────────────────────────────────────────────
+  - id: ACME-F-002
+    title: "认证绕过：`..;/` 路径归一化绕过网关鉴权，未认证访问管理接口"
+    severity: high
+    delivery_order: 2
+    target: admin.demo-acme.example.com
+    status: verified
+    status_changed_at: 2026-08-12T16:40:00+08:00
+    last_rechecked: 2026-08-12
+    summary: |
+      管理后台位于网关鉴权之后，但网关与后端对路径归一化不一致：请求
+      /assets/..;/admin/dashboard 时网关按静态资源放行，后端将 ..;/ 归一化后
+      路由到真实管理接口。未携带任何 Cookie/Authorization 即返回管理面板
+      订单聚合 JSON（脱敏：订单数 + 金额汇总，无个人数据）。
+    poc: output/poc-acme-002.py
+    replay_signature: '"total_orders": 128'
+    money_ready: false
+    missing: "缺甲方对管理接口数据敏感度的确认（订单聚合是否属机密）"
+    trigger: null
+    unlock_plan:
+      trigger_what: null
+      channel: null
+      deadline: null
+    evidence:
+      - output/poc-acme-002.py
+      - output/rounds/2026-08-12.md
+    history:
+      - {at: 2026-08-12T15:50:00+08:00, from: phenomenon, to: candidate, note: "管理口 401 后按『403/401 不停』反射换路径试 ..;/ 判别三连：P2 绕过成立，技术闭"}
+      - {at: 2026-08-12T16:40:00+08:00, from: candidate, to: verified, note: "反事实 4 问通过：(1) 去掉 ..;/ 直接访问 /admin/dashboard 返回 401 → 确认是路径归一化差异而非接口本身无鉴权；(2) 清空全部 Cookie 重放仍成立 → 未授权；(3) 假响应反证：网关配置路径 /assets/..;/ 不存在的资源返回 404 而管理路径返回 200 → 非统一误报；(4) 证伪反例：假设为网关缓存，改动 query 参数后重放仍返回实时聚合数据 → 无法推翻，verified"}
+
+  # ─────────────────────────────────────────────
+  # ACME-F-003 IDOR 越权读他人订单（GET-only，未批量）
+  # ─────────────────────────────────────────────
+  - id: ACME-F-003
+    title: "IDOR：/api/orders/<id> 未校验归属，GET 越权读取他人订单"
+    severity: medium
+    delivery_order: 3
+    target: api.demo-acme.example.com
+    status: verified
+    status_changed_at: 2026-08-12T17:30:00+08:00
+    last_rechecked: 2026-08-12
+    summary: |
+      订单详情接口仅校验登录态未校验归属：将 id 替换为相邻订单号返回其他
+      用户订单（脱敏样例：订单号 ORD-2026-08123、金额、收件地址哈希）。
+      GET 只读验证 2 次即止，未批量拉取。
+    poc: output/poc-acme-003.py
+    replay_signature: '"order_no": "ORD-2026-08123"'
+    money_ready: false
+    missing: "缺影响面评估（可遍历订单规模）+ 甲方确认"
+    trigger: null
+    unlock_plan:
+      trigger_what: null
+      channel: null
+      deadline: null
+    evidence:
+      - output/poc-acme-003.py
+      - output/rounds/2026-08-12.md
+    history:
+      - {at: 2026-08-12T17:00:00+08:00, from: phenomenon, to: candidate, note: "A 账号订单响应含 id 字段，反射命中 id 参数 → IDOR 反证试替换"}
+      - {at: 2026-08-12T17:30:00+08:00, from: candidate, to: verified, note: "反事实 4 问通过：(1) 替换 id=ORD-2026-08122 返回不同订单（A 账号下单号 08121）→ 归属未校验；(2) 无 Cookie 返回 401 → 确需登录，非未授权；(3) 假响应反证：换不存在的订单号返回 404 → 数据真实存在；(4) 证伪反例：假设是 A 账号自己的历史订单，比对下单记录订单号不包含 08123 → 无法推翻，verified"}

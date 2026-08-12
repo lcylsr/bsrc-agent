@@ -1,0 +1,20 @@
+# tools/external-tools.yaml — 外部二进制路径 SSOT
+#
+# 声明各工具的 path（可选）。若不填或文件缺失，tool_resolve.py 退回 PATH 查找。
+# 不要在这里硬编码机器特定路径（如 E:/Tianhu/...）；每台机器自行配置或依赖 PATH。
+#
+# 自检：python tools/lib/tool_resolve.py --selftest
+
+tools:
+  subfinder:
+    # path: /usr/local/bin/subfinder   # 取消注释并填写你的路径（如 PATH 里有可不填）
+  httpx:
+    # path: /usr/local/bin/httpx
+  oneforall:
+    # path: /path/to/OneForAll/oneforall.py
+  nuclei:
+    # path: /usr/local/bin/nuclei
+  sqlmap:
+    # path: /usr/local/bin/sqlmap
+  nmap:
+    # path: /usr/bin/nmap

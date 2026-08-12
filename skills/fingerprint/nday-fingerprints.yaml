@@ -1,0 +1,734 @@
+# N-day / 历史漏洞指纹库
+#
+# 用途: 把「产品/组件/版本指纹」与「高置信历史漏洞检查」绑定。
+#       供 tools/nday-matcher.py 读取,在 recon/status 阶段自动提示攻击面。
+#
+# 设计原则:
+#   - 只放有明显公开 N-day 或历史漏洞的产品/组件,不放纯技术栈(如 Java/PHP)
+#   - 每个指纹必须带安全 GET 检查(status + hit_grep),不能上来就投 RCE payload
+#   - 命中 ≠ verified;命中只表示「值得按对应 playbook/skill 深入」
+#   - 新增指纹时尽量复用已有 playbook,没有则新建 memory/playbooks/playbook-<id>.md
+#
+# 字段说明:
+#   id: 唯一 slug(小写、连字符)
+#   name: 可读名称
+#   product: 产品名
+#   severity: critical | high | medium | low
+#   tags: 扫描/召回标签
+#   triggers: 命中条件列表,列表内每个元素是 OR 关系
+#     - 直接条件: {type: path|header|body|title|server|cookie, value: 子串}
+#     - all_of: 子条件全部匹配(AND)
+#     - any_of: 子条件任意匹配(OR)
+#   playbook/skill: 后续打法文档(至少一个)
+#   checks: 安全 GET 探测,用于确认指纹/判断补丁
+#     - name: 检查名
+#     - path: 相对路径,支持 {base} 占位(会被 base_url 替换)
+#     - method: GET(默认)
+#     - headers: dict(可选)
+#     - status: 期望状态码列表(可选)
+#     - hit_grep: 命中特征(子串,大小写不敏感)
+#     - fixed_grep: 已修复特征(可选)
+#     - note: 人工备注
+#     - command: 推荐命令(可选,用于报告展示)
+#     - scanner_tags: 传给 scanner-dispatch.py --tags 的标签(可选)
+
+fingerprints:
+  - id: seeyon-a8
+    name: 致远互联 OA A8 反序列化 / 文件上传
+    product: 致远互联 Seeyon OA A8 / M3
+    severity: critical
+    tags: [seeyon, a8, oa, deserialization, upload, java]
+    triggers:
+      - type: path
+        value: "/seeyon/"
+      - type: header
+        value: "Server: Coyote"
+      - type: body
+        value: "M3"
+    playbook: memory/playbooks/playbook-seeyon-a8-deserialization.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: htmlofficeservlet 是否存在
+        path: /seeyon/htmlofficeservlet
+        status: ["200", "405", "500"]
+        hit_grep: htmlofficeservlet
+        note: A8 历史反序列化/任意文件上传入口;下一步按 playbook 构造 PoC,必须请示重武器
+        command: "curl -sk -m 10 -o /dev/null -w '%{http_code}' {base}/seeyon/htmlofficeservlet"
+        scanner_tags: cve,seeyon
+
+  - id: weaver-ecology
+    name: 泛微 e-cology SQLi / 文件上传 / 命令执行
+    product: 泛微 Weaver e-cology
+    severity: critical
+    tags: [weaver, ecology, oa, sqli, upload, rce, java]
+    triggers:
+      - type: path
+        value: "/api/ec/"
+      - type: path
+        value: "/wui/"
+      - type: body
+        value: "ecology"
+      - type: cookie
+        value: "ecology_"
+    playbook: memory/playbooks/playbook-weaver-ecology-sqli-upload.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: e-cology 默认接口可达
+        path: /api/ec/devtools/workflow/xmlViewer.jsp
+        status: ["200", "500"]
+        hit_grep: xmlViewer
+        note: e-cology 历史 SQLi/后台 getshell 入口;存在即高危,按 playbook 验证
+        command: "curl -sk -m 10 '{base}/api/ec/devtools/workflow/xmlViewer.jsp'"
+        scanner_tags: cve,weaver
+
+  - id: yonyou-nc
+    name: 用友 NC / NC Cloud 文件上传 / 反序列化
+    product: 用友 YonYou NC / NC Cloud
+    severity: critical
+    tags: [yonyou, nc, nccloud, upload, deserialization, java]
+    triggers:
+      - type: path
+        value: "/nc/"
+      - type: path
+        value: "/nccloud/"
+      - type: path
+        value: "/uapws/"
+      - type: body
+        value: "yonyou"
+    playbook: memory/playbooks/playbook-yonyou-nc-cloud-upload-deserialization.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: NC 登录页是否存在
+        path: /nc/index.jsp
+        status: ["200", "302"]
+        hit_grep: login
+        note: NC/NC Cloud 历史任意文件上传 + 反序列化;需先确认版本再选 payload
+        command: "curl -sk -m 10 '{base}/nc/index.jsp'"
+        scanner_tags: cve,yonyou
+
+  - id: kingdee-k3cloud
+    name: 金蝶 K3 Cloud 反序列化 / SSRF
+    product: 金蝶 Kingdee K3 Cloud
+    severity: critical
+    tags: [kingdee, k3cloud, deserialization, ssrf, dotnet]
+    triggers:
+      - type: path
+        value: "/k3cloud/"
+      - type: cookie
+        value: "kdservice-"
+      - type: body
+        value: "Kingdee.BOS"
+    playbook: memory/playbooks/playbook-kingdee-k3cloud-deserialization.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: K3 Cloud 登录入口
+        path: /k3cloud/html5/index.aspx
+        status: ["200", "302", "401"]
+        hit_grep: Kingdee
+        note: K3 Cloud 历史反序列化/SSRF;存在即需深挖 Kingdee.BOS.App 服务接口
+        command: "curl -sk -m 10 '{base}/k3cloud/html5/index.aspx'"
+        scanner_tags: cve,kingdee
+
+  - id: longshine-stalent
+    name: 长盛 sTalent EHR 客户化目录穿越 / 自研加密层
+    product: 长盛 Longshine sTalent EHR
+    severity: high
+    tags: [longshine, stalent, ehr, path-traversal, crypto, java]
+    triggers:
+      - type: header
+        value: "X-Powered-By: longshine"
+      - type: path
+        value: "/CustStyle/"
+      - type: body
+        value: "SERVICEPROVIDER"
+      - type: cookie
+        value: "LsCookies"
+    skill: skills/fingerprint/recon-product-fingerprint.md
+    checks:
+      - name: 客户化目录枚举
+        path: /CustStyle/default/
+        status: ["200", "403"]
+        hit_grep: CustStyle
+        note: 长盛二开层比标准框架更脆弱;需按 recon-product-fingerprint 同款打
+        command: "curl -sk -m 10 '{base}/CustStyle/default/'"
+        scanner_tags: longshine,stalent
+
+  - id: finereport
+    name: 帆软 FineReport CAS / 认证绕过 / 任意文件读取
+    product: 帆软 FineReport V10/V11
+    severity: high
+    tags: [finereport, fanruan, bi, auth-bypass, file-read, java]
+    triggers:
+      - type: path
+        value: "/webroot/decision/"
+      - type: body
+        value: "FineReport"
+      - type: body
+        value: "ReportServer"
+    playbook: memory/playbooks/playbook-finereport-cas-auth-architecture.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: FineReport 决策平台登录页
+        path: /webroot/decision/login
+        status: ["200", "302"]
+        hit_grep: FineReport
+        note: FineReport 历史认证绕过 + 任意文件读取;按 playbook 打 CAS/XHR 头绕过
+        command: "curl -sk -m 10 '{base}/webroot/decision/login'"
+        scanner_tags: cve,finereport
+
+  - id: camunda-setup
+    name: Camunda setup wizard 未初始化 RCE
+    product: Camunda BPM Platform
+    severity: critical
+    tags: [camunda, bpm, rce, setup, java]
+    triggers:
+      - type: path
+        value: "/camunda/"
+      - type: path
+        value: "/form/"
+      - type: path
+        value: "/bpm/"
+      - type: body
+        value: "Camunda"
+    playbook: memory/playbooks/playbook-camunda-setup-unconfigured-rce.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: setup wizard 是否未初始化
+        path: /camunda/app/admin/default/setup/
+        status: ["200"]
+        hit_grep: "Camunda Admin"
+        note: 命中即 deliverable 级 Critical RCE,8 包内可闭环
+        command: "curl -sk -m 10 '{base}/camunda/app/admin/default/setup/'"
+        scanner_tags: cve,camunda
+      - name: engine-rest 版本接口
+        path: /engine-rest/version
+        status: ["200"]
+        hit_grep: version
+        note: version 接口是稳定指纹,可用它替代写操作做指纹识别
+        command: "curl -sk -m 10 '{base}/engine-rest/version'"
+
+  - id: axis2-sample
+    name: Axis2 + sample services 未授权 RCE
+    product: Apache Axis2 (常带默认 sample services)
+    severity: critical
+    tags: [axis2, apache, rce, sample, java]
+    triggers:
+      - type: path
+        value: "/axis2/services/"
+      - type: body
+        value: "Axis2"
+      - type: body
+        value: "Services"
+    playbook: memory/playbooks/playbook-axis2-quickstart-sample-rce-standard-poc.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: Axis2 services 列表
+        path: /axis2/services/
+        status: ["200"]
+        hit_grep: Services
+        note: 存在默认服务(如 version/echo)即可 RCE;按 playbook 5 包闭环
+        command: "curl -sk -m 10 '{base}/axis2/services/'"
+        scanner_tags: cve,axis2
+
+  - id: confluence-ognl
+    name: Atlassian Confluence OGNL RCE
+    product: Atlassian Confluence
+    severity: critical
+    tags: [confluence, atlassian, ognl, rce, java]
+    triggers:
+      - type: path
+        value: "/confluence/"
+      - type: path
+        value: "/wiki/"
+      - type: title
+        value: "Confluence"
+      - type: body
+        value: "atlassian"
+    playbook: memory/playbooks/playbook-confluence-ognl-rce.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: Confluence 登录页
+        path: /login.action
+        status: ["200", "302"]
+        hit_grep: Confluence
+        note: CVE-2021-26084 / CVE-2022-26134 等历史 RCE;先确认版本再选 payload
+        command: "curl -sk -m 10 '{base}/login.action'"
+        scanner_tags: cve,confluence
+
+  - id: jenkins-script
+    name: Jenkins 脚本控制台 / CLI 任意文件读取
+    product: Jenkins CI
+    severity: critical
+    tags: [jenkins, ci, rce, groovy, java]
+    triggers:
+      - type: header
+        value: "X-Jenkins"
+      - type: path
+        value: "/jenkins/"
+      - type: title
+        value: "Jenkins"
+    playbook: memory/playbooks/playbook-jenkins-script-rce.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: Jenkins 登录页 / 脚本控制台
+        path: /script
+        status: ["200", "403"]
+        hit_grep: Jenkins
+        note: /script 无鉴权或弱鉴权 = RCE;CVE-2024-23897 CLI 任意文件读取也需关注
+        command: "curl -sk -m 10 '{base}/script'"
+        scanner_tags: cve,jenkins
+
+  - id: gitlab-exif
+    name: GitLab EXIF / 文件解析 RCE
+    product: GitLab CE/EE
+    severity: high
+    tags: [gitlab, rce, exif, file-upload, ruby]
+    triggers:
+      - type: header
+        value: "GitLab"
+      - type: path
+        value: "/users/sign_in"
+      - type: title
+        value: "GitLab"
+    playbook: memory/playbooks/playbook-gitlab-exif-rce.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: GitLab 登录页
+        path: /users/sign_in
+        status: ["200"]
+        hit_grep: GitLab
+        note: 关注上传/头像解析类 RCE,以及 GitLab Runner 配置泄露
+        command: "curl -sk -m 10 '{base}/users/sign_in'"
+        scanner_tags: cve,gitlab
+
+  - id: exchange-proxyshell
+    name: Microsoft Exchange ProxyShell / ProxyLogon
+    product: Microsoft Exchange Server
+    severity: critical
+    tags: [exchange, microsoft, proxyshell, proxylogon, rce]
+    triggers:
+      - type: path
+        value: "/owa/"
+      - type: path
+        value: "/autodiscover/"
+      - type: header
+        value: "Microsoft-IIS"
+      - type: title
+        value: "Outlook"
+    playbook: memory/playbooks/playbook-exchange-proxyshell.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: Autodiscover 端点
+        path: /autodiscover/autodiscover.json
+        status: ["200", "302", "401"]
+        hit_grep: autodiscover
+        note: ProxyShell 链第一步;/autodiscover 响应异常即需按 playbook 验证
+        command: "curl -sk -m 10 '{base}/autodiscover/autodiscover.json'"
+        scanner_tags: cve,exchange
+
+  - id: druid-monitor
+    name: Druid 监控后台未授权/弱口令
+    product: Alibaba Druid Monitor
+    severity: high
+    tags: [druid, monitor, java, unauthorized, default-creds]
+    triggers:
+      - type: path
+        value: "/druid/"
+      - type: title
+        value: "Druid Monitor"
+      - type: body
+        value: "Druid Stat Index"
+    playbook: memory/playbooks/playbook-druid-unauthorized-access.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: Druid 首页是否可访
+        path: /druid/index.html
+        status: ["200"]
+        hit_grep: "Druid"
+        note: 未授权访问即高价值信息泄露;弱口令则进一步读 session/DB 凭据
+        command: "curl -sk -m 10 '{base}/druid/index.html'"
+        scanner_tags: cve,druid
+
+  - id: ureport-designer
+    name: uReport 报表设计器未授权/默认口令
+    product: uReport (Java 报表组件)
+    severity: high
+    tags: [ureport, designer, report, java, unauthorized]
+    triggers:
+      - type: path
+        value: "/ureport/"
+      - type: body
+        value: "ureport"
+      - type: title
+        value: "ureport"
+    playbook: memory/playbooks/playbook-ureport-designer-unauthorized.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: uReport 设计器是否可访
+        path: /ureport/designer
+        status: ["200"]
+        hit_grep: "ureport"
+        note: 设计器未授权可直接连数据源、读文件、执行报表表达式
+        command: "curl -sk -m 10 '{base}/ureport/designer'"
+        scanner_tags: cve,ureport
+
+  - id: swagger-api-leak
+    name: Swagger / Knife4j 接口文档未授权访问
+    product: Swagger UI / Knife4j
+    severity: medium
+    tags: [swagger, knife4j, api-doc, info-leak]
+    triggers:
+      - type: path
+        value: "/swagger-ui"
+      - type: path
+        value: "/v2/api-docs"
+      - type: path
+        value: "/v3/api-docs"
+      - type: path
+        value: "/doc.html"
+      - type: title
+        value: "Swagger"
+      - type: title
+        value: "Knife4j"
+    playbook: memory/playbooks/playbook-swagger-api-info-leak.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: Swagger 文档 JSON 是否可访
+        path: /v2/api-docs
+        status: ["200"]
+        hit_grep: "swagger"
+        note: 文档泄露 ≠ 漏洞,但可快速发现未授权管理接口/敏感字段
+        command: "curl -sk -m 10 '{base}/v2/api-docs'"
+        scanner_tags: cve,swagger
+
+  - id: ueditor
+    name: UEditor 任意文件上传 / SSRF
+    product: UEditor
+    severity: high
+    tags: [ueditor, upload, ssrf, php, java, dotnet]
+    triggers:
+      - type: path
+        value: "/ueditor/"
+      - type: body
+        value: "UEditor"
+      - type: body
+        value: "ueditor.config.js"
+    playbook: memory/playbooks/playbook-ueditor-upload-arbitrary-file.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: UEditor 配置文件是否可访
+        path: /ueditor/ueditor.config.js
+        status: ["200"]
+        hit_grep: "UEDITOR_CONFIG"
+        note: 存在即有上传/SSRF 历史洞风险,按 playbook 测 controller.php/controller.jsp/controller.ashx
+        command: "curl -sk -m 10 '{base}/ueditor/ueditor.config.js'"
+        scanner_tags: cve,ueditor
+
+  - id: thinkphp-rce
+    name: ThinkPHP 历史 RCE / 未授权访问
+    product: ThinkPHP
+    severity: critical
+    tags: [thinkphp, rce, php, deserialization]
+    triggers:
+      - type: header
+        value: "X-Powered-By: ThinkPHP"
+      - type: body
+        value: "ThinkPHP"
+      - type: path
+        value: "/index.php?s="
+    playbook: memory/playbooks/playbook-thinkphp-rce.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: ThinkPHP 错误页/版本探测
+        path: /index.php?s=captcha
+        status: ["200", "500"]
+        hit_grep: "ThinkPHP"
+        note: 5.0.22/5.1.x 历史 RCE 入口;命中后按 playbook 投 _method=__construct payload
+        command: "curl -sk -m 10 '{base}/index.php?s=captcha'"
+        scanner_tags: cve,thinkphp
+
+# --- fingerprint-exploit loop (+12) ---
+  - id: ruoyi
+    name: 若依 RuoYi / 二开残留路径
+    product: RuoYi / 基于若依二开
+    severity: high
+    tags: [ruoyi, second-dev, java, springboot, unauthorized]
+    triggers:
+      - type: path
+        value: "/prod-api/"
+      - type: path
+        value: "/system/user"
+      - type: path
+        value: "/captchaImage"
+      - type: body
+        value: "RuoYi"
+      - type: body
+        value: "若依"
+    playbook: memory/playbooks/playbook-ruoyi-second-dev-residual.md
+    skill: skills/cn-specific/second-dev.md
+    checks:
+      - name: captchaImage 探活
+        path: /captchaImage
+        status: ["200"]
+        hit_grep: "img|uuid|captcha|code"
+        note: 若依常见验证码接口;命中后按 playbook 测 /system/* 未授权与代码生成器残留。命中≠verified
+        command: "curl -sk -m 10 '{base}/captchaImage'"
+
+  - id: jeecg-boot
+    name: JeecgBoot / 低代码残留
+    product: JeecgBoot
+    severity: high
+    tags: [jeecg, second-dev, java, lowcode, unauthorized]
+    triggers:
+      - type: path
+        value: "/jeecg-boot/"
+      - type: path
+        value: "/sys/common"
+      - type: path
+        value: "/jmreport/"
+      - type: body
+        value: "Jeecg"
+      - type: body
+        value: "jeecg-boot"
+    playbook: memory/playbooks/playbook-jeecg-boot-residual.md
+    skill: skills/cn-specific/second-dev.md
+    checks:
+      - name: jeecg-boot 根路径探活
+        path: /jeecg-boot/
+        status: ["200", "302", "401"]
+        hit_grep: "jeecg|Jeecg|login"
+        note: 命中后测 /jmreport/ /online/ /sys/ 未授权;命中≠verified
+        command: "curl -sk -m 10 '{base}/jeecg-boot/'"
+
+  - id: nacos
+    name: Nacos 控制台暴露
+    product: Alibaba Nacos
+    severity: critical
+    tags: [nacos, config, default-creds, unauthorized]
+    triggers:
+      - type: path
+        value: "/nacos/"
+      - type: body
+        value: "Nacos"
+      - type: title
+        value: "Nacos"
+    playbook: memory/playbooks/playbook-nacos-default-cred-unauth.md
+    skill: skills/cn-specific/second-dev.md
+    checks:
+      - name: Nacos server state
+        path: /nacos/v1/console/server/state
+        status: ["200"]
+        hit_grep: "standalone_mode|version|auth_enabled"
+        note: 仅探活/state;默认凭据 nacos/nacos 须人工验证,不自动爆破。命中≠verified
+        command: "curl -sk -m 10 '{base}/nacos/v1/console/server/state'"
+
+  - id: spring-actuator
+    name: Spring Boot Actuator 暴露
+    product: Spring Boot Actuator
+    severity: high
+    tags: [spring, actuator, info-leak, heapdump]
+    triggers:
+      - type: path
+        value: "/actuator"
+      - type: path
+        value: "/actuator/env"
+      - type: path
+        value: "/actuator/health"
+    playbook: memory/playbooks/playbook-spring-actuator-exposure.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: actuator 根
+        path: /actuator
+        status: ["200"]
+        hit_grep: "_links|health|env|info"
+        note: env/heapdump 可读则高危;仅 health 开放通常低危。命中≠verified
+        command: "curl -sk -m 10 '{base}/actuator'"
+
+  - id: tongda-oa
+    name: 通达 OA
+    product: 通达 Tongda OA
+    severity: critical
+    tags: [tongda, oa, php, rce, unauthorized]
+    triggers:
+      - type: path
+        value: "/general/"
+      - type: path
+        value: "/ispirit/"
+      - type: body
+        value: "通达"
+      - type: body
+        value: "tongda"
+    playbook: memory/playbooks/playbook-tongda-oa.md
+    skill: skills/cn-specific/cn-oa-erp.md
+    checks:
+      - name: 登录页探活
+        path: /general/login.php
+        status: ["200", "302"]
+        hit_grep: "login|通达|tongda|OA"
+        note: 通达历史任意文件上传/SQL/RCE 多;按 playbook 与 cn-oa-erp 验证。命中≠verified
+        command: "curl -sk -m 10 '{base}/general/login.php'"
+
+  - id: landray-oa
+    name: 蓝凌 OA / EKP
+    product: 蓝凌 Landray OA/EKP
+    severity: critical
+    tags: [landray, oa, java, ssrf, rce]
+    triggers:
+      - type: path
+        value: "/sys/portal"
+      - type: path
+        value: "/km/"
+      - type: body
+        value: "Landray"
+      - type: body
+        value: "蓝凌"
+    playbook: memory/playbooks/playbook-landray-oa.md
+    skill: skills/cn-specific/cn-oa-erp.md
+    checks:
+      - name: login 探活
+        path: /login.jsp
+        status: ["200", "302"]
+        hit_grep: "login|Landray|蓝凌|EKP|lui"
+        note: 蓝凌历史 SSRF/反序列化/未授权多;按 playbook 验证。命中≠verified
+        command: "curl -sk -m 10 '{base}/login.jsp'"
+
+  - id: weaver-eoffice
+    name: 泛微 e-office
+    product: 泛微 Weaver e-office
+    severity: critical
+    tags: [weaver, eoffice, oa, upload, rce]
+    triggers:
+      - type: path
+        value: "/eoffice"
+      - type: path
+        value: "/E-mobile"
+      - type: body
+        value: "eoffice"
+      - type: body
+        value: "e-office"
+    playbook: memory/playbooks/playbook-weaver-eoffice.md
+    skill: skills/cn-specific/cn-oa-erp.md
+    checks:
+      - name: e-office 登录探活
+        path: /login.php
+        status: ["200", "302"]
+        hit_grep: "eoffice|e-office|login|泛微"
+        note: e-office 与 e-cology 不同产品线;按 eoffice playbook 验证。命中≠verified
+        command: "curl -sk -m 10 '{base}/login.php'"
+
+  - id: twinflex-ipes
+    name: 示例厂商 iPES / iPMS 鉴权漏配
+    product: 示例厂商 twinflex iPES/iPMS
+    severity: high
+    tags: [twinflex, ipes, ipms, auth, java]
+    triggers:
+      - type: path
+        value: "login.struts"
+      - type: path
+        value: "userAction.struts"
+      - type: body
+        value: "示例厂商"
+      - type: cookie
+        value: "susong"
+    playbook: memory/playbooks/playbook-twinflex-ipes-auth-stack.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: login.struts 探活
+        path: /login.struts
+        status: ["200", "302"]
+        hit_grep: "login|userAccount|验证码|struts"
+        note: 按 playbook 三件套:验证码失效/用户名枚举/注释凭据。命中≠verified
+        command: "curl -sk -m 10 '{base}/login.struts'"
+
+  - id: yonyou-u8-cloud
+    name: 用友 U8 Cloud / yyuap
+    product: 用友 U8 Cloud
+    severity: critical
+    tags: [yonyou, u8c, yyuap, java, upload]
+    triggers:
+      - type: path
+        value: "/u8c"
+      - type: path
+        value: "/yyuap"
+      - type: body
+        value: "U8C"
+      - type: body
+        value: "u8cloud"
+    playbook: memory/playbooks/playbook-yonyou-nc-cloud-upload-deserialization.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: U8C 入口探活
+        path: /u8c/
+        status: ["200", "302", "401"]
+        hit_grep: "u8|yonyou|login|U8C"
+        note: 与 NC Cloud 同源生态;上传/反序列化按 yonyou playbook。命中≠verified
+        command: "curl -sk -m 10 '{base}/u8c/'"
+
+  - id: h2-console
+    name: H2 Database Console 暴露
+    product: H2 Console
+    severity: critical
+    tags: [h2, console, rce, java]
+    triggers:
+      - type: path
+        value: "/h2-console"
+      - type: title
+        value: "H2 Console"
+      - type: body
+        value: "h2database"
+    playbook: memory/playbooks/playbook-h2-console-exposure.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: h2-console 探活
+        path: /h2-console
+        status: ["200", "302"]
+        hit_grep: "H2|login|jdbc"
+        note: 可登录则常可 RCE(CREATE ALIAS);重武器须请示。命中≠verified
+        command: "curl -sk -m 10 '{base}/h2-console'"
+
+  - id: apollo-portal
+    name: Apollo 配置中心 Portal
+    product: Ctrip Apollo
+    severity: high
+    tags: [apollo, config, default-creds]
+    triggers:
+      - type: path
+        value: "/signin"
+      - type: body
+        value: "apollo-portal"
+      - type: body
+        value: "Apollo"
+      - type: title
+        value: "Apollo"
+    playbook: memory/playbooks/playbook-apollo-portal.md
+    skill: skills/cn-specific/second-dev.md
+    checks:
+      - name: signin 探活
+        path: /signin
+        status: ["200"]
+        hit_grep: "apollo|Apollo|signin|login"
+        note: 默认 apollo/admin 等须人工验证;配置可读=高危。命中≠verified
+        command: "curl -sk -m 10 '{base}/signin'"
+
+  - id: minio-console
+    name: MinIO Console 暴露
+    product: MinIO
+    severity: high
+    tags: [minio, storage, default-creds, s3]
+    triggers:
+      - type: path
+        value: "/minio"
+      - type: body
+        value: "MinIO"
+      - type: title
+        value: "MinIO"
+    playbook: memory/playbooks/playbook-minio-console.md
+    skill: skills/fingerprint/nday-matcher.md
+    checks:
+      - name: MinIO 登录页
+        path: /login
+        status: ["200"]
+        hit_grep: "MinIO|minio|login"
+        note: 默认 minioadmin 凭据与桶遍历须人工;命中≠verified
+        command: "curl -sk -m 10 '{base}/login'"
+

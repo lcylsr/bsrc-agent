@@ -1,0 +1,19 @@
+2026-07-01 17:09 [poc-replay] F-06 重放失败 → 降级 phenomenon (signature 未在响应中找到(状态 403))
+2026-07-01 17:15 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 17:16 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 17:17 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 17:25 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 20:34 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 22:38 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 22:46 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 23:22 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 23:34 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-01 23:47 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-02 00:03 [bypass] delivery-gate SKIP_REPLAY=1
+2026-07-31 11:42 [bypass] delivery-gate SKIP_REPLAY=1
+2026-08-03 11:33 [bypass] delivery-gate SKIP_REPLAY=1
+2026-08-03 11:35 [bypass] delivery-gate SKIP_REPLAY=1
+2026-08-03 20:17 [bypass] delivery-gate SKIP_REPLAY=1
+2026-08-03 20:19 [bypass] delivery-gate SKIP_REPLAY=1
+2026-08-03 20:48 [bypass] delivery-gate SKIP_REPLAY=1
+2026-08-03 20:57 [bypass] delivery-gate SKIP_REPLAY=1

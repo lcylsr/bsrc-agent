@@ -1,0 +1,4 @@
+# Ignore harvested content size; keep structure
+*
+!.gitignore
+!README.md

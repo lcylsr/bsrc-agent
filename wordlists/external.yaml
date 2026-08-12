@@ -1,0 +1,39 @@
+# wordlists/external.yaml — L3 外置大字典映射(不入库真实内容)
+#
+# 用法:
+#   export SRCCOP_DICT_ROOT="E:/fuzz字典"   # 默认已探测该路径
+#   aliases 段由扫描器直接解析: python -c "import yaml;print(yaml.safe_load(open('wordlists/external.yaml'))['aliases'])"
+#
+# 路径相对于 SRCCOP_DICT_ROOT;也可写绝对路径。
+# 推荐外置金标准(需自行下载,不提交仓库):
+#   - SecLists: https://github.com/danielmiessler/SecLists
+#   - Assetnote wordlists: https://wordlists.assetnote.io/
+#   - OneListForAll: https://github.com/six2dez/OneListForAll
+#   - 本地已有: E:/fuzz字典/PayloadsAllTheThings , fuzzDicts-master , 字典/
+#
+# 原则:
+#   - 盲目录/API 大字典走 L3,仓库 L2 保持 ≤500 行
+#   - 盲 ID enum(shareId 等)用 materials gate,不用大字典狂扫
+#   - path/API fuzz 与资产 recon 不强制 materials
+
+aliases:
+  # ── 本机 E:/fuzz字典 已存在的映射(按实际目录调整) ──
+  fuzzdicts-api: fuzzDicts-master/apiDict
+  fuzzdicts-dir: fuzzDicts-master/directoryDicts
+  fuzzdicts-param: fuzzDicts-master/paramDict
+  fuzzdicts-ssrf: fuzzDicts-master/ssrfDicts
+  fuzzdicts-upload-ext: fuzzDicts-master/uploadFileExtDicts
+  fuzzdicts-spring: fuzzDicts-master/spring
+  payloads-all-the-things: PayloadsAllTheThings
+  local-dict-api: 字典/接口
+  local-dict-common: 字典/常用字典
+  local-mini-dir: 字典Mini/directoryDicts
+  local-mini-param: 字典Mini/paramDict
+
+  # ── 推荐外置(下载到 SRCCOP_DICT_ROOT 后启用) ──
+  # seclists-api: SecLists/Discovery/Web-Content/api/api-endpoints.txt
+  # seclists-raft-large: SecLists/Discovery/Web-Content/raft-large-words.txt
+  # seclists-common: SecLists/Discovery/Web-Content/common.txt
+  # assetnote-httparchive-api: assetnote/httparchive_apiroutes_*.txt
+  # assetnote-wordpress: assetnote/wordpress.fuzz.txt
+  # onelist-api: OneListForAll/onelistforallmicro.txt

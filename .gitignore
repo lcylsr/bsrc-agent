@@ -1,0 +1,273 @@
+# === Windows reserved device name artifact (can cause ripgrep errors) ===
+nul
+
+# === Migrated raw artifacts (indexed by .artifact-index.json, stored in E:/claude-artifacts) ===
+targets/**/*.body
+targets/**/*.headers
+targets/**/*.csv
+targets/**/*.log
+targets/**/probes/**/*.html
+targets/**/probes/**/*.js
+targets/**/probes/**/*.json
+targets/**/probes/**/*.txt
+targets/**/probes/**/*.xml
+targets/**/probes/**/*.bin
+targets/**/probes/**/*.hdr
+targets/**/probes/**/*.err
+targets/**/probes/**/*.code
+targets/**/probes/**/*.resp
+targets/**/probes/**/*.tsv
+targets/**/probes/**/*.tpl
+targets/**/probes/**/*.jar
+targets/**/probes/**/*.bpmn
+targets/**/raw/**/*.html
+targets/**/raw/**/*.js
+targets/**/raw/**/*.json
+targets/**/raw/**/*.txt
+targets/**/raw/**/*.xml
+targets/**/raw/**/*.bin
+targets/**/raw/**/*.jar
+targets/**/raw/**/*.bpmn
+targets/**/recon/**/*.html
+targets/**/recon/**/*.js
+targets/**/recon/**/*.json
+targets/**/recon/**/*.txt
+targets/**/recon/**/*.xml
+targets/**/recon/**/*.bin
+targets/**/recon/**/*.jar
+targets/**/recon/**/*.bpmn
+targets/**/artifacts/**/*.jar
+targets/**/artifacts/**/*.bpmn
+targets/**/artifacts/**/*.js
+targets/**/artifacts/**/*.json
+targets/**/artifacts/**/*.txt
+targets/**/artifacts/**/*.html
+targets/*/*.png
+targets/*/*.jpg
+targets/*/*.jpeg
+targets/_archived/*/*.png
+targets/_archived/*/*.jpg
+targets/_archived/*/*.jpeg
+!targets/**/.artifact-index.json
+
+# === Generated health/bloat reports (regenerated each run) ===
+doctrine/_health-report-*.md
+doctrine/_bloat-report-*.md
+
+# === Local tooling / worktrees (never commit) ===
+.claude/worktrees/
+.cursor/
+.zcode/
+temp/
+
+# === Environment & Secrets ===
+.env
+*.env.local
+.env.*
+tools/keys.env
+**/keys.env
+!tools/keys.env.example
+fofa_config.json
+fofa_progress.json
+*.network-response
+temp_*.json
+temp_*.md
+temp_*.txt
+
+# === Output (regenerated each run) ===
+output/scripts/
+output/logs/
+output/reports/
+output/recon/
+output/health/
+output/campaigns/
+output/assets/
+output/jadx*.zip
+output/*.html
+output/report_*.json
+output/23040/
+output/njgxq_bucket/
+output/target*.js
+output/ywxt_*.js
+output/temp_*
+output/*.js
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Session state (regenerated) ===
+hooks/state/*.json
+hooks/state/*.jsonl
+
+# === Chrome debug profile (large, regenerated) ===
+.chrome-debug/
+
+# === Knowledge base sessions (auto-generated, contains target data) ===
+knowledge-base/_memories/sessions/*.json
+
+# === Sensitive session artifacts ===
+cookies.txt
+headers.txt
+
+# === Temporary downloaded JS (should be in output/) ===
+claudefindings*.js
+sso_app*.js
+
+# === Claude plans (session-specific) ===
+.claude/plans/
+
+# === Red-team hook runtime state (regenerated) ===
+.claude/skills/red-team-doctrine/hooks/state/*.json
+
+# === Source maps (downloaded) ===
+*.map
+
+# === Stray artifacts ===
+*.~*
+*claudetest_*
+
+# === Findings (sensitive — real target data) ===
+findings/
+
+# === Knowledge base targets (sensitive) ===
+# (deprecated path; new path is targets/*/raw/)
+knowledge/targets/
+targets/*/raw/
+
+# === PoC scripts (sensitive) ===
+pocs/
+
+# === Temporary / experimental directories ===
+tmp/
+tmp_*/
+tmp_*.py
+tmp_*.txt
+tmp_*.png
+
+# === Sub-repos and large projects ===
+redcode/
+data/codehound/repos/
+_hack-skills-ref/
+
+# === FOFA scan artifacts ===
+fofa_*.json
+fofa_*.txt
+fofa_*.py
+
+# === Scripts (regenerated) ===
+/scripts/*
+!/scripts/claude_session_summarizer.py
+!/scripts/health.py
+!/scripts/setup_tool_venvs.py
+!/scripts/check_dependency_isolation.py
+
+# === Local isolated tool environments ===
+.venvs/
+
+# === Browser session logs ===
+.playwright-mcp/
+
+# === Captured pages (sensitive) ===
+captcha_*.png
+claude*.html
+*_login.html
+*_temp_*.html
+
+# === Codex artifacts ===
+codex-instructions.md
+codex.json
+
+# === Package manager (project uses pip, not npm) ===
+package.json
+package-lock.json
+node_modules/
+
+# === Claude Code local settings (contains target URLs) ===
+.claude/settings.local.json
+.claude/skills/kb-manager/.memory_hook_tracking.json
+.claude/skills/kb-manager/.posttool_tracking.json
+.claude/skills/kb-manager/.summarizer_tracking.json
+.claude/skills/kb-manager/.classifier_errors.log
+.claude/skills/kb-manager/.summarizer_errors.log
+
+# === Generated search index (auto-rebuilt) ===
+.claude/skills/.skill_search_index.json
+
+# === Duplicate/accidental directories ===
+hooks/hooks/
+
+# === Logs ===
+*.log
+
+# === Red-team specific ===
+# Scan results and loot
+scans/
+loot/
+*.pem
+*.key
+*credentials*
+*secrets*
+# memory/playbooks 的"默认凭据"playbook 是知识文件,不是扫描战利品
+!memory/playbooks/*credentials*.md
+
+# MCP config (may contain tokens)
+.mcp.json
+
+# === Keep structure (whitelist) ===
+!output/.gitkeep
+!output/reports/.gitkeep
+!output/scripts/.gitkeep
+!output/logs/.gitkeep
+!knowledge-base/_memories/sessions/.gitkeep
+!knowledge-base/_memories/insights/.gitkeep
+!knowledge-base/_resources/images/.gitkeep
+!findings/.gitkeep
+.claude/state/
+
+# === Mission raw data (probe outputs, downloaded source maps, sensitive client artifacts) ===
+# Active path: targets/*/raw/  (above)
+# Legacy paths kept in case old worktrees still write here:
+knowledge/missions/_active/*/raw/
+knowledge/missions/_archived/*/raw/
+memory/missions/*/raw/
+.claude-state/
+
+# === Runtime session state per target ===
+targets/*/.resume_shown_at
+targets/_archived/*/.resume_shown_at
+targets/*/.session-snapshots/
+targets/*/*/.session-snapshots/
+targets/*/.last_pending_tick
+targets/*/.session-context.json
+targets/*/.session-memory.md
+targets/*/.token-budget.json
+targets/*/.replay-status.json
+
+# === IDE / editor residual ===
+.trae/
+.claude/memory/
+
+# === v6 deprecated ===
+targets/_BOARD.md
+
+# === Client extracted apps (外迁到 E:/claude-artifacts) ===
+targets/**/extracted/
+targets/**/extracted_*/
+targets/**/asar_extract/
+targets/**/node_modules/

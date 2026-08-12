@@ -1,0 +1,51 @@
+# waf-signatures.txt — WAF/风控拦截页特征关键字
+# fuzz-engine 用此文件识别响应是否被 WAF 拦截;命中后触发绕过重试 + 降速
+
+# 通用拦截
+blocked
+forbidden
+access denied
+403 forbidden
+waf
+web application firewall
+firewall
+security
+拦截
+访问被拒绝
+非法请求
+已被拦截
+
+# 云厂商 WAF
+cloudflare
+incapsula
+akamai
+sucuri
+stackpath
+aws waf
+aliyun
+alibaba
+baidu yun
+qcloud
+tencent cloud
+huawei cloud
+
+# 国产 WAF
+长亭
+雷池
+安恒
+玄武盾
+知道创宇
+360网站卫士
+百度云加速
+云锁
+安全狗
+
+# 风控/防爬
+captcha
+verify
+robot
+rate limit
+too many requests
+429
+checking your browser
+please wait...

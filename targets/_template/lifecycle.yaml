@@ -1,0 +1,62 @@
+# ============================================================
+# lifecycle.yaml — finding 单一日志（真相源）
+# v2 根因方案 解法 A：所有视图（顶层索引/投递队列/可批清单/到期提醒/报告）由
+# `python tools/findings-lint.py <target_dir> --lifecycle [--gen]` 生成，禁止人肉双写。
+#
+# 状态机（每次变更追加一条 history，当前状态 = history 末条）：
+#   phenomenon → candidate → verified → money_ready → delivered
+#                     ↑            ↑            ↑
+#                 (反事实4问+    (PoC可重放+   (采样证据四件套)
+#                  触发物字段)    business_evidence)
+#
+# 前置条件（lint --lifecycle 强制检查）：
+#   candidate     必须带 trigger（等账号/等样本/等批复/技术闭）+ unlock_plan
+#   verified      必须带 business_evidence + poc（replay_script/poc_curl 至少一）
+#   money_ready=no 必须带 missing（缺什么，补证据队列自动进）
+#   delivered     必须带 submitted_at
+#   rejected/fixed 必须带 reason
+# ============================================================
+
+target: _TBD_                    # targets/<t> 目录名
+mode: src                        # src | redteam | pentest
+created: 2026-MM-DD              # 开图日期
+updated: 2026-MM-DD              # 最近变更日期（lint --gen 后刷新）
+
+# ---- 每日可批清单（解法 B：授权分级，按包数不按工具名）----
+# L0 只读 GET 默认授权；L1 1包级口令/签名验证=批量预授权；L2 注册类=单次批准；L3 重武器=单次批准
+# 该段由 lint --lifecycle 从 findings 的 unlock_plan 自动生成，人工只维护 findings 本体
+approval_queue:
+  - finding: _TBD_
+    level: L1                    # L1 | L2 | L3
+    action: _TBD_                # 具体动作（如 "harbor Harbor12345 1包 GET 验证"）
+    packets: 1                   # 预计包数
+    benefit: _TBD_               # 预期收益
+    approved: false              # 用户回"批 1/3/5"或"全批 L1"后置 true
+    approved_at: null
+
+findings: []                     # 每条结构见 _template 示例块（复制自下方模板）
+
+# ---- 模板：新增 finding 复制此块 ----
+# - id: F-XXX
+#   title: <一句话摘要>
+#   severity: medium             # critical | high | medium | low | info
+#   delivery_order: null         # 投递顺序（用户拍板后填 1..N；98=另行；99=单独报告）
+#   target: <子域或资产>          # 根 findings 用根域
+#   status: phenomenon           # phenomenon | candidate | verified | money_ready | delivered | rejected | fixed
+#   status_changed_at: 2026-MM-DDTHH:MM:00+08:00
+#   summary: |
+#     <2-3 行现象与影响；verified 必须含真实业务影响（business_evidence），禁止 HTTP 200/success:true>
+#   poc: <output/poc-<id>.py | poc_curl | 重放命令>     # verified 必填
+#   replay_signature: <≥8字节具体业务证据串>             # verified 必填
+#   money_ready: false           # true | false
+#   missing: null                # money_ready=false 时必填："缺 business_evidence / 缺采样 / 缺用户拍板"等
+#   # ---- 解锁计划（candidate 必填）----
+#   trigger: null                # 等账号 | 等样本 | 等批复 | 技术闭 | null
+#   unlock_plan:
+#     trigger_what: null         # 具体触发物：如 "百应测试账号 13900000001" / "供应商代码" / "用户批准"
+#     channel: null              # 渠道：如 "SRC 官方申请" / "平台注册" / "对话请示"
+#     deadline: null             # 期限：如 "2026-08-24"（2 周归档规则）或 "P0"（前置申请）
+#   # ---- 证据链（各状态补充）----
+#   evidence: []                 # [artifact:xxx | output/poc-*.py | 证据路径]
+#   history:                     # append-only，最新在末
+#     - {at: 2026-MM-DDTHH:MM:00+08:00, from: phenomenon, to: candidate, note: "..."}

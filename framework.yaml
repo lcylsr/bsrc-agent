@@ -1,0 +1,120 @@
+# framework.yaml — 框架单一真实来源（极简版 v6.0-slim）
+#
+# 设计原则：AI 在驾驶座。脚本只做 AI 干不好的（法律硬拦 / 外部二进制调度 / 批量 IO）。
+# 状态机/token预算/迁移规则等框架级元维护自动化已移除——框架不该复杂到需要专职运维。
+# 注：MCP 工具健康度自检保留（tools/mcp-health.sh，功能性检查，QUICK.md 工具速查引用）。
+#
+# 更新原则：框架结构变化时先改本文件，再改 CLAUDE.md。
+
+version: "v6.0-slim"
+
+# ─────────────────────────────────────────────
+# docs.active — 开场必读的唯一入口（其余按需 Read）
+# ─────────────────────────────────────────────
+docs:
+  active:
+    - path: CLAUDE.md
+      role: 顶层入口，每次会话首先读取（含铁律/4阶段/工具速查/skills清单）
+  on_demand:
+    - path: doctrine/law.md
+      role: 法律红线详释，攻击前按需读
+    - path: doctrine/reflexes.md
+      role: 双层反射准则（参数级 + 系统指纹级），命中指纹/参数时读
+    - path: doctrine/coverage-audit.md
+      role: 收尾覆盖审计 checklist
+    - path: QUICK.md
+      role: 决策树 / 反射准则 fallback + 不报清单一句版，挖洞拐点主动 Read
+
+# ─────────────────────────────────────────────
+# skills.active — 当前启用的 skill 文件路径（按需读取）
+# ─────────────────────────────────────────────
+skills:
+  active:
+    - skills/api-logic/api-guessing.md
+    - skills/api-logic/auth-bypass.md
+    - skills/api-logic/idor-bola.md
+    - skills/api-logic/ssrf-arbitrary-file.md
+    - skills/api-logic/file-upload.md
+    - skills/api-logic/business-logic.md
+    - skills/api-logic/fuzz.md
+    - skills/api-logic/authed-deep-dive.md
+    - skills/api-logic/subdomain-takeover.md
+    - skills/api-logic/request-smuggling.md
+    - skills/fingerprint/recon-product-fingerprint.md
+    - skills/fingerprint/waf-evasion.md
+    - skills/fingerprint/nday-matcher.md
+    - skills/injection/nosql-graphql.md
+    - skills/injection/sqli-blind.md
+    - skills/injection/cache-poisoning.md
+    - skills/injection/deserialization-rce.md
+    - skills/injection/ssti-cmdi-xxe.md
+    - skills/js-reverse/crypto-sign.md
+    - skills/js-reverse/js-deep-analysis.md
+    - skills/orchestrator.md
+    - skills/src-hunting-methodology.md
+    - skills/chain-playbook.md
+    - skills/cn-specific/cn-oa-erp.md
+    - skills/cn-specific/cn-crypto.md
+    - skills/cn-specific/second-dev.md
+    - skills/cn-specific/cn-auth.md
+    - skills/cloud-security.md
+  on_demand:
+    - skills/mobile/android.md
+    - skills/mobile/desktop-client.md
+    - skills/mobile/ios.md
+    - skills/mobile/miniprogram.md
+    - skills/mobile/app-auto-test.md
+
+# ─────────────────────────────────────────────
+# driver — 国内大模型适配层（参赛运行核心，模型无关）
+# 零依赖（stdlib only）+ OpenAI 兼容 chat/completions
+# 双协议：function calling + ReAct 代码块（不支持时自动降级）
+# ─────────────────────────────────────────────
+driver:
+  entry: driver/copilot.py
+  config: driver/config.example.json
+  models:
+    - {name: DeepSeek, api_base: "https://api.deepseek.com/v1", model: deepseek-chat}
+    - {name: GLM, api_base: "https://open.bigmodel.cn/api/paas/v4", model: glm-4-flash}
+    - {name: 文心 Comate, api_base: "以赛事说明为准"}
+  modes: [self-check, demo, commander, agent, orchestrate]
+
+# ─────────────────────────────────────────────
+# tools.active — 主动工具清单（极简）
+# guard: 法律硬拦（AI 不能替代）
+# lint:  轻量格式校验
+# recon: 批量资产测绘（外部二进制 + API 分页，AI 逐个慢）
+# dispatch: 外部重武器受控调度（scope/rate-limit/GET-only 校验）
+# ─────────────────────────────────────────────
+tools:
+  root_cli: tools/run.sh
+  agent:
+    - tools/agent-launch.py      # 6 个自定义 agent 的 prompt 渲染器（recon/pentest/app/client/verifier/review）
+  guard:
+    - tools/danger-guard.sh
+    - tools/lib/business_impact.py
+  lint:
+    - tools/findings-lint.py
+  recon:
+    - tools/recon-pipeline.py      # subfinder + httpx
+    - tools/space-recon.py         # FOFA/Hunter/Quake API
+    - tools/js-recon.py            # JS bundle 批量提取 API/密钥
+    - tools/nday-matcher.py        # 指纹 → CVE 库匹配
+  dispatch:
+    - tools/scanner-dispatch.py    # nuclei/sqlmap/nmap 受控调度
+
+# ─────────────────────────────────────────────
+# memory.rules — MEMORY.md / INDEX.md 的自动生成范围
+# ─────────────────────────────────────────────
+memory:
+  memory_md_scope: [playbooks, insights, reference, rejected, reflections]
+  index_md_scope: [playbooks, insights, reference, inbox, rejected, reflections]
+
+# ─────────────────────────────────────────────
+# artifacts — 探测产物落盘约定（极简）
+# 响应体/下载/截图/解包 → <workspace>/.artifacts/tmp/<key>/
+# （演示包用相对路径；操作者环境可自定义，见 CLAUDE.md §1 铁律·探测写 TEMP）
+# 仓库只留 findings.md / scope.md / _STATE.md / timeline.md / output/ 文本产物
+# ─────────────────────────────────────────────
+artifacts:
+  temp_root: .artifacts/tmp

@@ -14,6 +14,11 @@
 import sys
 import urllib.error
 import urllib.request
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 GATEWAY = "https://admin.demo-acme.example.com"  # 虚构目标
 REPLAY_SIGNATURE = '"total_orders": 128'

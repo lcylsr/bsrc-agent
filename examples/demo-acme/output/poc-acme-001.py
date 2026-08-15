@@ -13,6 +13,11 @@ import json
 import sys
 import urllib.error
 import urllib.request
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 TARGET = "https://api.demo-acme.example.com"  # 虚构目标（RFC 5737 占位）
 ENDPOINT = "/api/v1/asset-preview"

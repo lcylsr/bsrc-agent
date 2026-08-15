@@ -13,6 +13,11 @@
 import sys
 import urllib.error
 import urllib.request
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 API = "https://api.demo-acme.example.com"  # 虚构目标
 ENDPOINT = "/api/v1/orders"

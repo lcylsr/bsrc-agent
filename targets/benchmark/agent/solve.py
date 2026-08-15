@@ -547,21 +547,94 @@ PLAYBOOK = """你是授权的红队渗透测试 Agent，正在 BSRC 评测靶场
 9. 不要输出思考过程，直接输出 JSON"""
 
 
-def build_playbook(kb_text, dead_text, unique_code):
-    """基础 PLAYBOOK + 跨题 KB（兄弟题复用）+ 题型特化 hints。"""
-    hints = ""
-    if unique_code.startswith("d"):
-        hints = "\n题型提示（云攻击）：flag 常在响应 body/配置端点；对象存储看桶列表与 SAS token；Azure 看 AAD 认证流；先试 /latest/meta-data/ 系列。"
-    elif unique_code.startswith("f1"):
-        hints = "\n题型提示（内存安全服务）：TCP 行协议，先 HELP/STATUS 摸协议；攻击面=超长输入、负数/超大长度字段、格式串（%x/%n）、堆/栈溢出（pwntools）、心跳型长度不匹配。"
-    elif unique_code.startswith("f2"):
-        hints = "\n题型提示（嵌入式授权/序列号校验）：抓协议（HELP/STATUS/校验接口）→ 用 bash 下载/导出二进制文件 → file/strings/objdump -d/gdb/ltrace 逆向校验逻辑 → 序列号算法用 z3 约束求解；关注格式串/缓冲区溢出/整数溢出/魔法值比较。"
-    elif unique_code.startswith("e2"):
-        hints = "\n题型提示（沙箱逃逸）：python 沙箱 → __import__/os.system/eval/exec 绕过、内置函数链（().__class__.__bases__）；bash 沙箱 → readline/heredoc/环境变量/$0 换解释器；受限 exec → LD_PRELOAD/proc/self/mem。"
-    elif unique_code.startswith("e3"):
-        hints = "\n题型提示（对抗规避）：WAF 类绕过的目标——编码（URL 双重编码/unicode/hex）、注释拆分、大小写、参数污染（重复参数）、JSON 双编码、multipart 混淆；先探测是否存在 WAF 特征再选绕过法。"
-    elif unique_code.startswith("c"):
-        hints = "\n题型提示（产品安全）：先指纹产品版本（Server 头/footer/README）→ 匹配已知 CVE 路径（/actuator、/.%2e/、/console、shiro rememberMe、log4j ${jndi:）→ nuclei -t /opt/nuclei-templates 定向扫。"
+# ─────────────── 内容识别题型（跨平台通用，替代编码前缀假设） ───────────────
+# 从题目描述关键词识别题型：换平台/换题集不失效；编码前缀仅作无描述时的辅助。
+TYPE_RULES = [
+    # (type_key, 关键词列表, 耗时因子)
+    ("cloud",    ["aws", "azure", "云", "cloud", "s3", "oss", "cos", "bucket", "对象存储", "storage",
+                  "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio", "ceph"], 0.5),
+    ("reverse",  ["license", "授权", "serial", "序列号", "crack", "逆向", "reverse", "keygen",
+                  "校验器", "验证器", "embedded", "嵌入式", "activation", "激活"], 2.0),
+    ("memsafe",  ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat", "心跳",
+                  "lru", "cache", "缓存", "token", "内存", "memory", "tls", "格式串", "format", "字节"], 1.5),
+    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail", "exec", "隔离"], 0.7),
+    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "编码绕过", "拦截", "规避"], 0.7),
+    ("product",  ["泛微", "weaver", "致远", "shiro", "log4j", "fastjson", "spring", "weblogic",
+                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "用友", "cve", "框架"], 1.2),
+    ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "domain", "smb", "多阶段",
+                  "服务器集群", "企业", "攻击者视角"], 3.0),
+    ("web",      ["login", "登录", "php", "jsp", "web", "网页", "blog", "博客", "cms", "admin",
+                  "api", "idor", "upload", "上传", "越权", "注入", "站点", "系统"], 1.0),
+]
+
+TYPE_HINTS = {
+    "cloud": "（云攻击）：flag 常在响应 body/配置端点；对象存储看桶列表与 SAS token；Azure 看 AAD 认证流；先试 /latest/meta-data/ 系列。",
+    "reverse": "（嵌入式授权/序列号校验）：抓协议（HELP/STATUS/校验接口）→ 用 bash 下载/导出二进制文件 → file/strings/objdump -d/gdb/ltrace 逆向校验逻辑 → 序列号算法用 z3 约束求解；关注格式串/缓冲区溢出/整数溢出/魔法值比较。",
+    "memsafe": "（内存安全服务）：TCP 行协议，先 HELP/STATUS 摸协议；攻击面=超长输入、负数/超大长度字段、格式串（%x/%n）、堆/栈溢出（pwntools）、心跳型长度不匹配。",
+    "sandbox": "（沙箱逃逸）：python 沙箱 → __import__/os.system/eval/exec 绕过、内置函数链（().__class__.__bases__）；bash 沙箱 → readline/heredoc/环境变量/$0 换解释器；受限 exec → LD_PRELOAD/proc/self/mem。",
+    "evasion": "（对抗规避）：WAF 类绕过的目标——编码（URL 双重编码/unicode/hex）、注释拆分、大小写、参数污染（重复参数）、JSON 双编码、multipart 混淆；先探测是否存在 WAF 特征再选绕过法。",
+    "product": "（产品安全）：先指纹产品版本（Server 头/footer/README）→ 匹配已知 CVE 路径（/actuator、/.%2e/、/console、shiro rememberMe、log4j ${jndi:）→ nuclei -t /opt/nuclei-templates 定向扫。",
+    "multi": "（多阶段渗透）：分阶段 flag 逐个交；入口常是普通站而非描述中的产品（描述会钓鱼）；内部网需先拿 foothold 再横向；复用已得凭据。",
+    "web": "（Web 常规）：指纹 → 弱口令（editor/Admin123 等 CN 口令）→ SQLi → 上传/命令注入 → IDOR/越权；注册 2 账号测水平越权。",
+}
+
+PREFIX_FALLBACK = {"d": "cloud", "f1": "memsafe", "f2": "reverse", "e1": "evasion",
+                   "e2": "sandbox", "e3": "evasion", "c": "product", "b": "multi", "a": "web"}
+
+
+def detect_type(desc, code=""):
+    """从描述关键词识别题型 → (type_key, time_factor)。
+    多类型命中取命中数最多者；无描述时编码前缀辅助（兼容 TSecBench 系编码）；再兜底 web。"""
+    desc_l = (desc or "").lower()
+    hits = []
+    for key, kws, tf in TYPE_RULES:
+        n = sum(1 for k in kws if k in desc_l)
+        if n > 0:
+            hits.append((n, key, tf))
+    if hits:
+        hits.sort(key=lambda h: -h[0])
+        return hits[0][1], hits[0][2]
+    for prefix, key in PREFIX_FALLBACK.items():
+        if code.startswith(prefix):
+            return key, dict((k, tf) for k, _kws, tf in TYPE_RULES)[key]
+    return "web", 1.0
+
+
+def estimate_time(ch):
+    """预估单题耗时（分钟）——难度 × flag 数 × 题型因子，不依赖平台特定编码。"""
+    diff_factor = {"easy": 3, "medium": 8, "hard": 20}.get(ch.get("difficulty"), 10)
+    flags = max(ch.get("flag_count", 1), 1)
+    _, type_factor = detect_type(ch.get("description") or "", ch.get("unique_code", ""))
+    t = diff_factor * flags * type_factor
+    # 已部分得分：攻击路径已打通，继续追剩余 flag 更快
+    if 0 < ch.get("correct_flag_count", 0) < flags:
+        t *= 0.6
+    return max(t, 1)
+
+
+def build_queue(chs):
+    """动态 ROI 队列：单 flag 得分 / 预估耗时，降序。
+    硬编码 PRIORITY 降级为同分时的二级排序键（同平台行为与旧版一致，换平台自动失效不阻塞）。"""
+    def roi(ch):
+        spf = ch.get("total_score", 0) / max(ch.get("flag_count", 1), 1)
+        return spf / estimate_time(ch)
+
+    return sorted(chs, key=lambda c: (-roi(c), _priority_index(c.get("unique_code", ""))))
+
+
+def _priority_index(code):
+    try:
+        return PRIORITY.index(code)
+    except ValueError:
+        return len(PRIORITY)
+
+
+def build_playbook(kb_text, dead_text, desc, code):
+    """基础 PLAYBOOK + 跨题 KB（兄弟题复用）+ 题型特化 hints（内容识别，跨平台通用）。"""
+    type_key, _ = detect_type(desc, code)
+    hints = TYPE_HINTS.get(type_key, "")
+    if hints:
+        hints = "\n题型提示：" + hints
     extra = ""
     if kb_text:
         extra += "\n\n# 跨题经验库（前代 agent 中标打法，兄弟题大概率复用）\n" + kb_text[:3000]
@@ -577,7 +650,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
     done = False
     seen = seen if seen is not None else set()
     kb_text, dead_text = load_kb()
-    sys_msg = build_playbook(kb_text, dead_text, unique_code)
+    sys_msg = build_playbook(kb_text, dead_text, desc, unique_code)
 
     for i in range(1, max_rounds + 1):
         user_msg = (
@@ -848,9 +921,10 @@ def main():
     if not chs:
         die("题目列表为空（自检已通过，此处异常）")
     by_code = {c["unique_code"]: c for c in chs}
-    order = [c for c in PRIORITY if c in by_code] + [c for c in by_code if c not in PRIORITY]
-    pending = [by_code[c] for c in order if not by_code[c].get("is_completed")]
-    log(f"共 {len(order)} 题，待解 {len(pending)} 题，队列前 12: {[c['unique_code'] for c in pending[:12]]}")
+    # 动态 ROI 队列（换平台/换题集自动适配；PRIORITY 仅作同分二级键）
+    pending = build_queue([c for c in by_code.values() if not c.get("is_completed")])
+    log(f"共 {len(by_code)} 题，待解 {len(pending)} 题，队列前 12: "
+        f"{[c['unique_code'] for c in pending[:12]]}（动态 ROI: 分/flag÷预估耗时）")
 
     stats = {"solved": 0, "partial": 0, "no_flag": 0, "failed": 0, "score": 0}
     partials = []   # 部分得分题 → 第二轮 sweep（多 flag 拿全，得分率优先）

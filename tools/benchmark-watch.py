@@ -78,25 +78,44 @@ def api_fetch(base, token, timeout=20):
         return 0, {"message": str(e)}
 
 
-def roi_order(code):
-    """按 ROI 顺序排序（低投入高确定性先显示，与 solve.py PRIORITY 同序）。"""
-    PRIORITY = [
-        "d-01", "d-02", "d-04", "d-06", "d-03", "d-05",
-        "e3-01", "e3-03", "e3-04", "e3-02",
-        "e2-01", "e2-03", "e2-04", "e2-02",
-        "c-03", "c-06", "c-07", "c-08", "c-09",
-        "a-05", "a-12", "a-03", "a-04", "a-07", "a-09", "a-14", "a-17", "a-10",
-        "c-01", "c-02", "c-04", "c-05",
-        "e1-01", "e1-02", "e1-05", "e1-03", "e1-04", "e1-06",
-        "a-01", "a-02", "a-06", "a-08", "a-11", "a-13", "a-15", "a-16", "a-18",
-        "f1-04", "f1-01", "f1-02", "f1-03", "f1-05",
-        "f2-08", "f2-01", "f2-02", "f2-03", "f2-04", "f2-05", "f2-06", "f2-07",
-        "b-01", "b-02", "b-03",
-    ]
-    try:
-        return PRIORITY.index(code)
-    except ValueError:
-        return len(PRIORITY)
+# 题型关键词（与 solve.py TYPE_RULES 同思路的轻量版；watch 只用于显示排序）
+WATCH_TYPE_FACTOR = [
+    ("cloud",    ["aws", "azure", "云", "cloud", "s3", "oss", "cos", "bucket", "对象存储",
+                  "storage", "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio"], 0.5),
+    ("reverse",  ["license", "授权", "serial", "序列号", "crack", "逆向", "keygen",
+                  "校验器", "验证器", "embedded", "嵌入式", "activation"], 2.0),
+    ("memsafe",  ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat",
+                  "lru", "cache", "缓存", "内存", "memory", "tls", "格式串", "字节"], 1.5),
+    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail"], 0.7),
+    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "拦截"], 0.7),
+    ("product",  ["泛微", "weaver", "shiro", "log4j", "fastjson", "spring", "weblogic",
+                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "cve"], 1.2),
+    ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "smb", "多阶段", "企业"], 3.0),
+    ("web",      ["login", "登录", "php", "jsp", "web", "blog", "博客", "cms", "admin",
+                  "api", "idor", "upload", "上传", "越权", "注入"], 1.0),
+]
+def roi_order(ch):
+    """动态 ROI 显示排序（低投入高确定性先显示；与 solve.py build_queue 同思路）。"""
+    code = ch.get("unique_code", "")
+    desc_l = (ch.get("description") or "").lower()
+    tf = 1.0
+    hits = [(sum(1 for k in kws if k in desc_l), tf_) for _, kws, tf_ in WATCH_TYPE_FACTOR]
+    hits = [h for h in hits if h[0] > 0]
+    if hits:
+        tf = max(hits, key=lambda h: h[0])[1]
+    else:
+        # 无描述时前缀 fallback（与 solve.py PREFIX_FALLBACK 同表）
+        PREFIX_TF = {"d": 0.5, "f1": 1.5, "f2": 2.0, "e1": 0.7, "e2": 0.7, "e3": 0.7,
+                     "c": 1.2, "b": 3.0, "a": 1.0}
+        for prefix, ftf in PREFIX_TF.items():
+            if code.startswith(prefix):
+                tf = ftf
+                break
+    diff = {"easy": 3, "medium": 8, "hard": 20}.get(ch.get("difficulty"), 10)
+    flags = max(ch.get("flag_count", 1), 1)
+    est = max(diff * flags * tf, 1)
+    spf = ch.get("total_score", 0) / flags
+    return - (spf / est)  # 升序排序取负 = ROI 降序
 
 
 def render(chs, log_tail=None, interval=None):
@@ -114,7 +133,7 @@ def render(chs, log_tail=None, interval=None):
     print("-" * 72)
     print(f"{'状态':<3} {'题号':<8} {'难度':<6} {'flag':<9} {'得分':<7} {'容器':<18} 标题")
     print("-" * 72)
-    for c in sorted(chs, key=lambda x: (x.get("is_completed"), roi_order(x.get("unique_code", "")))):
+    for c in sorted(chs, key=lambda x: (x.get("is_completed"), roi_order(x))):
         mark = ICON["done"] if c.get("is_completed") else (
             ICON["active"] if c.get("container_status") == "available" else ICON["idle"])
         flags = f"{c.get('correct_flag_count', 0)}/{c.get('flag_count', 0)}"

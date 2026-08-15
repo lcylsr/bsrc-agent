@@ -80,6 +80,8 @@ print(run("for i in $(seq 1 10); do ...; done"))  # 内网扫描等复合命令
 
 ## 6. 题型速查（低投入高确定性的分先拿，每题启动必得）
 
+> 题型识别已改为**内容识别**（solve.py `detect_type`：描述关键词命中 → 题型因子；无描述时编码前缀辅助；再兜底 web）——换平台/换题集不失效。ROI 队列由 `build_queue` 动态计算（单 flag 分 ÷ 预估耗时），不依赖硬编码题号。
+
 | 前缀 | 题型 | 秒杀套路 |
 |---|---|---|
 | e1/e2/e3 | 对抗规避/沙箱逃逸 | 快路径端点 + 编码绕过/沙箱逃逸 payload（见 `skills/binary/playbook-re.md` 与 build_playbook hints） |

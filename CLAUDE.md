@@ -86,6 +86,7 @@
 | `src` | **money_ready** | 赏金/众测，可投递 + 真实影响 | core-10 + readiness（见 `doctrine/coverage-audit.md`） |
 | `redteam` | **入口/路径** | 攻防打点，Kill Chain 优先 | Kill Chain 故事线；verified 仍须可重放 |
 | `pentest` | 覆盖+报告 | 完整渗透，资产矩阵 | 写 report 前按 `doctrine/coverage-audit.md` 全 88 项自审 |
+| `benchmark` | **得分率**（每题必得 + 多 flag 拿全） | CTF 跑分（TSecBench），**得分优先、效率其次**：启动的每道题都要拿到分，wrong submit 免费；分钟级耗时可接受 | 四件套交接齐 + 经验回写（见 `doctrine/benchmark-mode.md`） |
 
 `task_weight:`
 - `standard` — 默认，按 4 阶段完整执行
@@ -219,6 +220,8 @@ bash tools/run.sh nday-matcher <target_dir>
 | 生成报告 | AI 写 `targets/<t>/output/report-<日期>.md` |
 | 受控重武器 | `bash tools/run.sh scanner-dispatch <tool> <target_dir> <url_or_host> [--tags ...] [--confirm]` |
 | SSRF/任意文件读探测 | `bash tools/run.sh ssrf-probe <target> "<url>"` |
+| 跑分平台（TSecBench） | `bash tools/run.sh benchmark-api list\|start\|hint\|submit\|close`（凭据=BENCHMARK_BASE_URL/BENCHMARK_TOKEN，见 keys.env.example） |
+| 跑分实时监控 | `bash tools/run.sh benchmark-watch [--interval 15\|--once\|--no-clear\|--log <file>]`；托管镜像内日志在 `/app/workspace/run.log` |
 | 覆盖审计 | 收尾读 `doctrine/coverage-audit.md` checklist 逐条标注（src=core-10） |
 | 空间测绘 | `bash tools/run.sh space-recon <target_dir> <domain>` |
 | findings 格式校验 | `python tools/findings-lint.py <target_dir>/findings.md` |

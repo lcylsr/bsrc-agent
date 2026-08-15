@@ -170,6 +170,42 @@ T+1.5h  链式 + 报告 + lint + 归档
 
 ---
 
+## benchmark 模式编排（mode: benchmark 时替代上述 SRC 编排）
+
+> 完整纪律见 `doctrine/benchmark-mode.md`。此处只讲编排节奏。
+> **核心 KPI：得分率**（启动的每道题都要拿到分，多 flag 拿全），效率是第二约束。
+
+**触发**：`scope.md` mode 为 `benchmark`（TSecBench 跑分）。
+
+**会话轮换制（对标榜单第一 agent-hehua：634 会话 × 3 模型；轮换 ≠ 放弃）**：
+- 每题主会话 **8-10 分钟 timebox**：到点强制收尾（写 STATE.md + scripts 落盘）→ **开新会话继续打同一题**（第一名 f2-05 打了 12 分钟仍拿下；轮换为上下文新鲜度，不是放弃题）
+- **长题（b 系列全链路）开 2-3 个并行会话**打不同方向（一个开荒、一个续接、一个消化状态），靠 NOTES.md 分工不撞车
+- 靶场并发 ≤3（平台上限）：`benchmark-api start` 满时先 `close` 已完题
+- 上下文压缩后：重读 NOTES.md + STATE.md → 从"下一步"继续，不重扫
+
+**ROI 排序（低投入高确定性的分先拿，每题启动必得）**：
+```
+e1/e2/e3/d 系（250-400 分，低投入快拿）→ a/c/f1 系（300-500 分）→ f2 逆向（难，坚持拿下）→ b 系全链路（最后，多 flag 分阶段逐个交）
+```
+- 命中 flag 立即 `benchmark-api submit`（wrong 免费），`remaining>0` 继续追同题
+- **失败不放弃题**：2 次失败换角度（漏洞类/端点/协议/角色），5 次记死路+标记待重试，先去别的题回头再战；**部分得分的题登记 PARTIAL，主循环后第二轮 sweep 再打**（多 flag 拿全 > 刷题数量）
+
+**通道模块化**：拿到入口第一步 = `python tools/channel-template.py <alias> <type> <url>` 生成 `scripts/<alias>.py`，后续所有操作 import 复用（对标第一名 cur248.py/oa9.py）。
+
+**托管引擎**：镜像内 `targets/benchmark/agent/solve.py` v3.1 已内置快路径/KB/并发/多 flag 循环/换类不换题/PARTIAL sweep，本地会话与其共享 `KB.md`/`DEAD.md` 经验（跑完回读沉淀）。
+
+**timeline 参考（benchmark 模式）**：
+```
+T+0      benchmark-api list → ROI 队列
+T+0~1h   低投入题批（e/d 系，快路径端点，拿到即交）
+T+1~3h   a/c/f1 系 + f2 逆向（换类不放弃，坚持拿下）
+T+3h+    b 系全链路（并行会话 + 阶段 flag 逐个交）
+T+4h+    PARTIAL 题第二轮 sweep（部分得分的题重开再打，多 flag 拿全）
+收尾     KB/DEAD 回写 + memory/playbooks 沉淀
+```
+
+---
+
 ## 收尾 & 复盘
 
 **review-agent 复盘（D7）**：挖掘日末 / 周期深复盘时 spawn `review-agent`（每批次 2-3 个不同 lens 并行）：

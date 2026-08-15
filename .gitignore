@@ -271,3 +271,5 @@ targets/**/extracted/
 targets/**/extracted_*/
 targets/**/asar_extract/
 targets/**/node_modules/
+# === 跑分镜像构建产物（可再生成） ===
+targets/benchmark/agent/agent.tar.gz

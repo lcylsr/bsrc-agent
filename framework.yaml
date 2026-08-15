@@ -102,6 +102,8 @@ tools:
     - tools/nday-matcher.py        # 指纹 → CVE 库匹配
   dispatch:
     - tools/scanner-dispatch.py    # nuclei/sqlmap/nmap 受控调度
+  benchmark:
+    - tools/benchmark-api.py      # TSecBench 跑分平台客户端（list/start/hint/submit/close，挑战赛评测）
 
 # ─────────────────────────────────────────────
 # memory.rules — MEMORY.md / INDEX.md 的自动生成范围

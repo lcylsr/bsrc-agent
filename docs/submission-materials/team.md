@@ -8,7 +8,7 @@
 
 | 成员 | 角色 | 分工 | 本作品承担部分 |
 |---|---|---|---|
-| lcylsr04 | 架构 / 攻防 / 工程 | 框架总设计与实现、漏洞验证纪律、脱敏案例与 PoC、工具链与交付 | 全量：`driver/` 模型适配层、`examples/demo-acme/` 案例、`docs/competition-submission.md` 技术方案、README 与部署 |
+| lcylsr04 | 架构 / 攻防 / 工程 | 框架总设计与实现、漏洞验证纪律、脱敏案例与 PoC、跑分模式（benchmark 双轨）、工具链与交付 | 全量：`driver/` 模型适配层、`examples/demo-acme/` 案例、`targets/benchmark/` 跑分实战（托管镜像 + 实时监控）、`docs/competition-submission.md` 技术方案、README 与部署 |
 
 ## 一句话介绍
 

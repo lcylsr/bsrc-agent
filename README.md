@@ -37,14 +37,20 @@ Claude Code 仅是开发与演示宿主之一，参赛运行时由自研 `driver
 │   ├── config.example.json #   模型接入配置（DeepSeek / GLM / Comate）
 │   └── README.md           #   模型矩阵 + 安全边界
 ├── examples/demo-acme/     # ★ 脱敏漏洞实践案例（虚构目标，3 条 verified 全闭环）
-├── doctrine/               # 行动准则层（law / reflexes / coverage-audit）
+├── doctrine/               # 行动准则层（law / reflexes / coverage-audit / benchmark-mode）
 ├── skills/                 # 技能库层（漏洞类 × 技术栈 × 场景，按需读取）
+│   ├── binary/             #   f1/f2 内存安全 & 逆向 playbook（pwntools/gdb/z3）
+│   └── cloud/              #   云攻击速查（IMDS/Azure SAS/对象存储，跑分 d 系）
 ├── tools/                  # 工具层（AI 驱动，run.sh 统一入口）
 │   ├── run.sh              #   CLI 入口：工具发现 + 参数转发
 │   ├── findings-lint.py    #   lifecycle 状态机校验 + 视图生成
 │   ├── agent-launch.py     #   子代理 prompt 渲染器（6 种 agent，可渲染为纯文本喂给国内模型）
 │   ├── scanner-dispatch.py #   外部重武器受控调度
+│   ├── benchmark-api.py    #   TSecBench 跑分平台 API 客户端（list/start/hint/submit/close）
+│   ├── benchmark-watch.py  #   跑分实时监控终端（轮询 API + tail 日志）
+│   ├── channel-template.py #   RCE 通道模块生成器（webshell/ssh/cmd-inject 等 5 型）
 │   └── danger-guard.sh     #   PreToolUse 法律硬拦 hook
+├── targets/benchmark/      # ★ 跑分实战配置（TSecBench：NOTES/STATE/scripts 四件套 + 托管镜像 agent/）
 ├── .claude/agents/         # 多 Agent 协同层（6 种 agent 定义，模型无关）
 ├── mcp/                    # MCP 工具生态文档
 ├── targets/_template/      # 目标工作区模板
@@ -82,6 +88,30 @@ python driver/copilot.py commander targets/<甲方>/<目标>   # 或由 Claude C
 **运行指标**：完整小型目标约 1~2 万 token（DeepSeek 约 ¥0.1）、内存 <500MB、PoC 全离线可重放。
 **测试**：`pytest`（`pytest.ini` / `requirements-dev.txt`，仅回归测试需要）。
 
+## 四·补充、跑分模式（TSecBench / BSRC Agent+）
+
+同一框架的竞速形态（`mode: benchmark`，纪律见 `doctrine/benchmark-mode.md`）：
+
+```bash
+# 本地实时监控（跑分时开一个终端挂着）
+bash tools/run.sh benchmark-watch                # 15s 刷新：每题 flag 数/得分/容器状态
+bash tools/run.sh benchmark-watch --interval 5   # 5s 一刷（--once 单次快照 / --no-clear 增量）
+
+# 托管镜像（上传平台后容器内自动解题）
+cd targets/benchmark/agent && bash build.sh      # 构建 agent.tar.gz 上传
+#   镜像内自动：ROI 队列 → 快路径端点 → 跨题 KB → 并发 3 靶场 → 多 flag 循环 → PARTIAL sweep
+#   日志双写 /app/workspace/run.log（可下载查看）
+
+# 本地直接驱动平台 API
+bash tools/run.sh benchmark-api list             # 题目清单 + 作答进度
+bash tools/run.sh benchmark-api start <code>     # 启动靶场（并发 ≤3）
+```
+
+跑分模式三大机制（首轮 2250 分 → 对标榜单第一 22340 分机制拆解后的 v3.1 改进）：
+1. **得分率优先**：换类不换题（无进展触发换攻击面重试）、部分得分题第二轮 sweep 拿全剩余 flag
+2. **跨题经验库**：KB.md（中标打法）/ DEAD.md（死路）注入 LLM，兄弟题复用
+3. **快路径 + 实时可见**：16 个低开销端点命中即交；watch 终端实时监控每题进度
+
 ## 五、脱敏声明（重要）
 
 作品打包已执行以下处理，**包内不包含任何真实敏感信息**：
@@ -96,8 +126,6 @@ python driver/copilot.py commander targets/<甲方>/<目标>   # 或由 Claude C
 | 真实品牌名 | ✂ 替换为占位符（acme / demo-acme） |
 | 真实 IP | ✂ 替换为 RFC 5737 文档网段（10.0.0.x / 198.51.100.x） |
 | 探测响应体、临时文件、git 历史 | ✂ 剔除 |
-
-> 复验方式：`grep -rniE 'lenovo|vivo|kuaishou|oppo|wzbank|联想|快手|京东' .` 应为空。
 
 ## 六、核心设计理念
 

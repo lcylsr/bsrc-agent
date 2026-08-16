@@ -79,38 +79,50 @@ def api_fetch(base, token, timeout=20):
         return 0, {"message": str(e)}
 
 
-# 题型关键词（与 solve.py TYPE_RULES 同步；watch 只用于显示排序，保持执行/显示顺序一致）
+# 题型关键词（与 solve.py TYPE_RULES 完全同步；watch 只用于显示排序，保持执行/显示顺序一致）
 WATCH_TYPE_FACTOR = [
-    ("cloud",    ["aws", "azure", "云", "cloud", "s3", "oss", "cos", "bucket", "对象存储",
-                  "storage", "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio", "ceph"], 0.5),
-    ("android",  ["android", "apk", "dex", "安卓", "移动", "deep link", "社区 app", "app 附件"], 1.5),
+    ("cloud",    ["aws", "azure", "云", "cloud", "s3", "oss", "cos", "bucket", "对象存储", "storage",
+                  "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio", "ceph"], 0.5),
+    ("android",    ["android", "apk", "dex", "安卓", "移动", "deep link", "社区 app", "app 附件"], 1.5),
     ("chain",    ["合约", "rpc", "ethereum", "以太坊", "solidity", "区块链", "web3", "issolved",
                   "抽奖", "私钥", "contract", "blockchain"], 1.5),
-    ("ai",       ["大模型", "llm", "模型", "prompt", "提示注入", "教练", "生成平台", "文档解析",
+    ("ai",    ["大模型", "llm", "模型", "prompt", "提示注入", "教练", "生成平台", "文档解析",
                   "ai 面试", "ai 前端", "chat", "对话网站"], 1.2),
-    ("reverse",  ["license", "授权", "serial", "序列号", "crack", "逆向", "reverse", "keygen",
+    ("reverse",    ["license", "授权", "serial", "序列号", "crack", "逆向", "reverse", "keygen",
                   "校验器", "验证器", "embedded", "嵌入式", "activation", "激活", "macos", "ios"], 2.0),
-    ("memsafe",  ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat", "心跳",
-                  "lru", "cache", "缓存", "内存", "memory", "tls", "格式串", "字节"], 1.5),
-    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail", "isolat"], 0.7),
-    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "拦截", "网关"], 0.7),
-    ("product",  ["泛微", "weaver", "shiro", "log4j", "fastjson", "spring", "weblogic",
-                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "cve", "spring boot"], 1.2),
-    ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "smb", "多阶段", "企业",
-                  "internal", "lateral", "fleet", "pivot", "enterprise"], 3.0),
-    ("web",      ["login", "登录", "php", "jsp", "web", "blog", "博客", "cms", "admin",
-                  "api", "idor", "upload", "上传", "越权", "注入", "portal", "forum", "论坛", "商城", "社区"], 1.0),
+    ("memsafe",    ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat", "心跳",
+                  "lru", "cache", "缓存", "token", "内存", "memory", "tls", "格式串", "format", "字节"], 1.5),
+    ("sandbox",    ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail", "exec", "隔离",
+                  "isolat", "sandboxed"], 0.7),
+    ("evasion",    ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "编码绕过", "拦截",
+                  "规避", "waf 保护", "边缘网关", "网关拦截", "安全网关"], 0.7),
+    ("product",    ["泛微", "weaver", "致远", "shiro", "log4j", "fastjson", "spring", "weblogic",
+                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "用友", "cve",
+                  "框架", "spring boot"], 1.2),
+    ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "domain", "smb", "多阶段",
+                  "服务器集群", "企业", "攻击者视角", "internal", "lateral", "fleet", "pivot",
+                  "corporate", "enterprise", "fleet agent"], 3.0),
+    ("web",    ["login", "登录", "php", "jsp", "web", "网页", "blog", "博客", "cms", "admin",
+                  "api", "idor", "upload", "上传", "越权", "注入", "站点", "系统", "portal",
+                  "unauth", "search", "forum", "论坛", "平台", "商城", "社区",
+                  "下单", "支付", "回调", "签名", "订单", "金额", "竞态", "并发", "初始密码", "密码规则", "钱包", "线程"], 1.0),
 ]
+
+
 def roi_order(ch):
     """动态 ROI 显示排序（低投入高确定性先显示；与 solve.py build_queue 同思路）。"""
     code = ch.get("unique_code", "")
     desc_l = (ch.get("description") or "").lower()
     tf = 1.0
-    hits = [(sum(1 for k in kws if k in desc_l), tf_) for _, kws, tf_ in WATCH_TYPE_FACTOR]
-    hits = [h for h in hits if h[0] > 0]
+    hits = []
+    for _, kws, tf_ in WATCH_TYPE_FACTOR:
+        matched = [k for k in kws if k in desc_l]
+        if matched:
+            # 与 solve.py 同规则：特异性加权（长词权重高）
+            score = sum(3 if len(k) >= 4 else (2 if len(k) >= 3 else 1) for k in matched)
+            hits.append((score, tf_, max(len(k) for k in matched)))
     if hits:
-        # 与 solve.py detect_type 同规则：命中数优先，打平时因子大的类型优先
-        hits.sort(key=lambda h: (-h[0], -h[1]))
+        hits.sort(key=lambda h: (-h[0], -h[2], -h[1]))
         tf = hits[0][1]
     else:
         # 无描述时前缀 fallback（与 solve.py 同表；前缀后必须跟 - 或数字——"b-01" 匹配，"bctf-01" 不匹配）

@@ -10,12 +10,21 @@ WORKDIR /app
 #   tesseract/ddddocr — 验证码 OCR（前代教训：手撕验证码像素 = 送分）
 #   binutils/file/ltrace — f2 逆向静态分析（strings/objdump）
 #   socat — 内网转发/隧道
+#   nuclei + 模板 — c 系列产品题已知 CVE 扫描（构建期下载，运行期离线可用）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl wget netcat-openbsd dnsutils iputils-ping procps \
         nmap ffuf hydra sqlmap gdb strace \
         openssl default-mysql-client redis-tools \
-        tesseract-ocr binutils file ltrace socat \
+        tesseract-ocr binutils file ltrace socat unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# nuclei（Go 单二进制）+ 模板库（构建期下载；版本号按 latest release 动态获取）
+RUN NUCLEI_VER=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | grep -oP '"tag_name":\s*"v\K[0-9.]+' | head -1) \
+    && curl -sL -o /tmp/nuclei.zip "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_amd64.zip" \
+    && unzip -o /tmp/nuclei.zip -d /usr/local/bin/ nuclei && rm -f /tmp/nuclei.zip \
+    && curl -sL https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/main.tar.gz \
+       | tar xz -C /opt/ && mv /opt/nuclei-templates-main /opt/nuclei-templates && rm -rf /opt/nuclei-templates/.git \
+    && chmod +x /usr/local/bin/nuclei
 
 # Python 漏洞利用/分析库（与运行环境隔离）
 # androguard：纯 python APK/DEX 解析（bctf 安卓题 25% 占比，无需 JRE 的 jadx）

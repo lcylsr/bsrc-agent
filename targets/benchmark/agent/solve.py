@@ -24,7 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 # ─────────────── v3 升级（对标榜单第一 agent-hehua 机制） ───────────────
 # 1. 跨题 KB：/app/workspace/KB.md（中标打法）+ DEAD.md（死路）→ 注入 LLM，兄弟题复用
@@ -54,7 +54,7 @@ READY_TIMEOUT = 90     # 容器启动就绪等待（秒）——30-90s 启动期
 # ── 全部可调参数集中（G：魔法数字收敛，BENCHMARK_CFG 环境变量 JSON 覆盖） ──
 CONFIG = {
     "pass_limit": 4,              # 每题最多 4 轮 while 循环（每轮 ≤8 次 LLM）
-    "hint_on_stall": 2,           # 连续 N 轮无进展取平台 hint
+    "hint_on_stall": 3,           # 连续 N 轮无进展 + 换满角度才取平台 hint（收紧防滥用）
     "stall_switch_limit": 2,      # 换攻击面提示上限
     "sweep_min_remaining": 300,   # 剩余 <5 分钟不再 sweep
     "time_pool_cap": 7200,        # 时间池上限（秒）
@@ -85,16 +85,36 @@ TOTAL_TIME_LIMIT = int(os.environ.get("TASKS_TIME_LIMIT", 6 * 3600))  # 平台�
 # ── A：题型实际耗时经验（EMA，线程安全）——换平台自动校准 ROI 与预算 ──
 _TYPE_AVG_TIME = {}          # type_key -> 实测平均耗时（分钟）
 _RETRY_STATS = {}            # pass_no -> {"tried": n, "solved": n}（D 重开成功率学习）
+_TYPE_SOLVE_RATE = {}        # type_key -> {"tried": n, "solved": n}（题型解决率 → sweep 过滤）
 _PACE_MODE = "normal"        # C：tight / normal / loose（main 更新，solve_challenge 读取）
 _ADAPT_LOCK = threading.Lock()
 _current_concurrent = CONFIG["max_concurrent"]   # F：动态并发（连续 start 失败降级）
+_GATEWAY_DOWN_UNTIL = 0.0    # 双网关都失败后的冷却截止时间（防每轮都试浪费）
+
+
+def update_type_solve(desc, code, solved):
+    """记录题型解决率（sweep 过滤低成功率的死题型）。"""
+    type_key, _ = detect_type(desc, code)
+    with _ADAPT_LOCK:
+        s = _TYPE_SOLVE_RATE.setdefault(type_key, {"tried": 0, "solved": 0})
+        s["tried"] += 1
+        s["solved"] += 1 if solved else 0
+
+
+def type_solve_rate(desc, code):
+    """题型解决率：样本 <3 返回 1.0（不拦截）；有数据返回实际率。"""
+    type_key, _ = detect_type(desc, code)
+    s = _TYPE_SOLVE_RATE.get(type_key)
+    if not s or s["tried"] < 3:
+        return 1.0
+    return s["solved"] / s["tried"]
 
 
 def update_type_time(type_key, elapsed_min):
     """每题完成后更新该题型实际耗时 EMA（0.3 权重抗抖动）。无论解出与否都学习（反映真实难度）。"""
     with _ADAPT_LOCK:
         old = _TYPE_AVG_TIME.get(type_key)
-        _TYPE_AVG_TIME[type_key] = old * (1 - CONFIG["ema_weight"]) + elapsed_min * CONFIG["ema_weight"] if old else elapsed_min
+        _TYPE_AVG_TIME[type_key] = min(60, old * (1 - CONFIG["ema_weight"]) + elapsed_min * CONFIG["ema_weight"] if old else elapsed_min)  # 封顶 60min 防异常慢题污染
 
 
 def adaptive_budget(difficulty, type_key):
@@ -119,6 +139,8 @@ def pool_balance():
 
 def pool_earn(seconds):
     """快题解出后，剩余预算的 pool_save_ratio 存入池子（留安全垫），cap 防无限积累。"""
+    if seconds <= 0:
+        return
     with _time_pool_lock:
         global _time_pool
         _time_pool = min(_time_pool + seconds * CONFIG["pool_save_ratio"], CONFIG["time_pool_cap"])
@@ -126,6 +148,8 @@ def pool_earn(seconds):
 
 def pool_borrow(base_budget):
     """难题借时间：最多借 base_budget × borrow_ratio，池子不足则借全部。"""
+    if base_budget <= 0:
+        return 0.0
     with _time_pool_lock:
         global _time_pool
         borrow = min(_time_pool, base_budget * CONFIG["borrow_ratio"])
@@ -251,6 +275,22 @@ def normalize_flag(f):
     return f
 
 
+def flag_variants(f):
+    """提交变体：原样 + 小写前缀（平台 flag 格式为 flag{...}，提取可能得到 FLAG{...}）。
+    同时校验基本合法性（内容 ≥6 字符，防瞎猜 flag{test} 浪费提交）。"""
+    f = normalize_flag(f)
+    if not f or "{" not in f or "}" not in f:
+        return []
+    body = f[f.index("{") + 1:f.index("}")]
+    if len(body) < 6:
+        return []
+    variants = [f]
+    low = "flag{" + body + "}"
+    if low != f:
+        variants.append(low)
+    return variants
+
+
 def parse_flag_total(desc):
     """从题目描述解析 flags total（如 'flags total: 6' / '共 6 个 flag'），缺省 1。"""
     for pat in (r"flags?\s*(?:total|数量|总数)[^\d]{0,6}(\d+)", r"(\d+)\s*[个枚]\s*flag", r"flag[^\d]{0,6}(\d+)个"):
@@ -311,16 +351,24 @@ def api(path, method="GET", body=None, timeout=30):
         return 0, {"code": "network_error", "message": str(e)}
 
 
+_LIST_CACHE = []  # 上次成功拉取的题目列表（API 抖动时兜底）
+
+
 def list_challenges():
+    global _LIST_CACHE
     code, payload = api("/openapi/v1/challenges")
-    if code != 200:
-        ecode = payload.get("code") if isinstance(payload, dict) else None
-        if ecode == "invalid_state":
-            log(f"✗ 任务已结束（invalid_state）：{payload.get('message')} — 需在平台重新创建任务并更新 token")
-        else:
-            log(f"list 失败 [{code}] {payload}")
+    if code == 200:
+        _LIST_CACHE = payload
+        return payload
+    ecode = payload.get("code") if isinstance(payload, dict) else None
+    if ecode == "invalid_state":
+        log(f"✗ 任务已结束（invalid_state）：{payload.get('message')} — 需在平台重新创建任务并更新 token")
         return []
-    return payload
+    if _LIST_CACHE:
+        log(f"list 失败 [{code}]，使用缓存（{len(_LIST_CACHE)} 题）")
+        return _LIST_CACHE
+    log(f"list 失败 [{code}] {payload}")
+    return []
 
 
 def start_ch(unique_code):
@@ -375,14 +423,15 @@ def llm_chat(base_url, messages, max_tokens):
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {MODEL_KEY}"},
         method="POST",
     )
-    for attempt in (0, 1):
+    for attempt in range(3):
         try:
             with urllib.request.urlopen(req, timeout=150) as r:
                 data = json.loads(r.read().decode("utf-8", errors="replace"))
                 return data["choices"][0]["message"].get("content")
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                time.sleep(4)
+                # 限流：指数退避（4/8/16s）
+                time.sleep(4 * (attempt + 1))
                 continue
             if e.code in (401, 403):
                 log(f"LLM 网关认证失败 [{e.code}] — 检查 MODEL_API_KEY")
@@ -392,11 +441,21 @@ def llm_chat(base_url, messages, max_tokens):
     return None
 
 
-def llm(messages, max_tokens=4096):
+def llm(messages, max_tokens=16384):
+    """调用 LLM（主网关 + fallback）。双网关都失败 → 冷却 60s（防每轮都试浪费轮次）。"""
+    global _GATEWAY_DOWN_UNTIL
+    now = time.time()
+    if now < _GATEWAY_DOWN_UNTIL:
+        time.sleep(min(5, _GATEWAY_DOWN_UNTIL - now))
+        return None
     content = llm_chat(MODEL_API, messages, max_tokens)
     if content is None and MODEL_API_FALLBACK and MODEL_API_FALLBACK != MODEL_API:
         log("主网关不可用，切换 fallback 网关")
         content = llm_chat(MODEL_API_FALLBACK, messages, max_tokens)
+    if content is None:
+        _GATEWAY_DOWN_UNTIL = now + 60  # 双网关都失败 → 冷却 60s
+    else:
+        _GATEWAY_DOWN_UNTIL = 0.0
     return content
 
 
@@ -419,7 +478,7 @@ def _extract_json_values(content):
     return values
 
 
-def llm_actions(messages, max_tokens=8192):
+def llm_actions(messages, max_tokens=16384):
     """调用 LLM 并解析为动作列表（宽容解析，失败返回 None）。
 
     兼容输出形态：单对象 / 数组 / ```json 代码块 / 多裸对象拼接 / 前后废话。
@@ -686,7 +745,8 @@ PLAYBOOK = """你是授权的红队渗透测试 Agent，正在 BSRC 评测靶场
    - SQLi 命中后先查文件读写链：SELECT @@secure_file_priv 为空 → LOAD_FILE 读源码/配置 → INTO OUTFILE 写 webshell → RCE
    - 大输出重定向到文件再 grep/read，不要全量进上下文
 9. 不要输出思考过程，直接输出 JSON
-10. 反教条（重要）：题面描述与实际不符时以实际为准（入口常不是描述中的产品）；预设方法无效时自由发挥——组合漏洞、链式利用、非常规端点都由你判断；"已收集信息"仅供参考，不要被它限制"""
+10. 反教条（重要）：题面描述与实际不符时以实际为准（入口常不是描述中的产品）；预设方法无效时自由发挥——组合漏洞、链式利用、非常规端点都由你判断；"已收集信息"仅供参考，不要被它限制
+11. 输出体积纪律（防截断丢脚本）：单条 bash 命令 ≤300 字符；复杂攻击分两步——① 用 bash 动作把脚本写入文件（cat > x.py <<'EOF' 或 base64 解码写盘）② 下一轮用 bash 动作执行（python3 x.py）；不要在一条命令里又写又跑；单轮 JSON 总长 ≤6000 字符"""
 
 
 # ─────────────── 内容识别题型（跨平台通用，替代编码前缀假设） ───────────────
@@ -826,7 +886,9 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             + (f"补充要求: {extra_prompt}\n" if extra_prompt else "")
             + f"已收集信息（仅供参考，你可自行探测任何新方向/新端点/新思路，不受此清单限制）:\n"
             + "\n".join(history[-10:]) + "\n"
-            '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）'
+            '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）\n'
+            '【输出格式提醒（每轮必须遵守）：只输出一个 JSON 数组，形如 [{"type":"bash","command":"..."}]；'
+            '不要输出任何解释/计划/思考文本；不要用 ```json 包裹；不要输出多个裸对象。】'
         )
         if done_confirmed:
             # E：LLM 上一轮提议放弃——二次确认轮，强制换思路
@@ -843,6 +905,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
         actions, raw = llm_actions([{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}])
         if actions is None:
             last_raw = (raw or "")[:500]
+            history.append("[LLM 无有效输出，格式错误]")  # 供 solve_challenge 检测（hint 联动）
             log(f"  LLM 无有效输出 (轮 {i})，带纠正反馈重试")
             time.sleep(3)
             if i >= 3:
@@ -929,29 +992,30 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
 
 # ─────────────── 单题求解 ───────────────
 def submit_all(unique_code, flags, submitted, rejected=None):
-    """提交全部新 flag（网络失败重试 3 次，平台幂等不丢分）。
+    """提交全部新 flag（网络失败重试 3 次，平台幂等不丢分；FLAG{} 大写自动尝试小写变体）。
     返回新提交成功的 flag 数；被拒 flag 收集进 rejected（供 LLM 纠错反馈）。"""
     new_ok = 0
     for f in flags:
-        f = normalize_flag(f)
-        if not f or f in submitted:
-            continue
-        submitted.add(f)
-        ok, resp = False, {}
-        for attempt in range(3):
-            ok, resp = submit_flag(unique_code, f)
-            # 平台已响应（correct 与否都是终态）；仅网络错误重试
-            if not (isinstance(resp, dict) and resp.get("code") == "network_error"):
-                break
-            log(f"  submit 网络重试 {attempt + 1}/3: {resp}")
-            time.sleep(2 * (attempt + 1))
-        if ok:
-            new_ok += 1
-            log(f"  ✓✓ flag 提交成功! {resp}")
-        else:
-            log(f"  ✗ 提交被拒: {f[:40]} → {resp}")
-            if rejected is not None:
-                rejected.add(f)
+        for variant in flag_variants(f):
+            if not variant or variant in submitted:
+                continue
+            submitted.add(variant)
+            ok, resp = False, {}
+            for attempt in range(3):
+                ok, resp = submit_flag(unique_code, variant)
+                # 平台已响应（correct 与否都是终态）；仅网络错误重试
+                if not (isinstance(resp, dict) and resp.get("code") == "network_error"):
+                    break
+                log(f"  submit 网络重试 {attempt + 1}/3: {resp}")
+                time.sleep(2 * (attempt + 1))
+            if ok:
+                new_ok += 1
+                log(f"  ✓✓ flag 提交成功! {resp}")
+                break  # 变体命中即停（避免重复提交同 flag 的不同大小写）
+            else:
+                log(f"  ✗ 提交被拒: {variant[:40]} → {resp}")
+                if rejected is not None:
+                    rejected.add(variant)
     return new_ok
 
 
@@ -1116,7 +1180,22 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         return time_budget - (time.time() - t_start)
 
     # 容器就绪等待（30-90s 启动期探测全失败 = 轮次浪费）
-    wait_ready(addr)
+    ready = wait_ready(addr)
+    if not ready and pass_no == 1:
+        # 容器 90s 未就绪 → 疑似启动失败/失联 → 自动重开一次（防御：平台容器抖动）
+        log("  ⚠ 容器未就绪，尝试重开一次")
+        close_ch(unique_code)
+        time.sleep(3)
+        for attempt in range(3):
+            addrs2, _ = start_ch(unique_code)
+            if addrs2:
+                addr = addrs2[0]
+                base_url = f"http://{addr}"
+                log(f"  重开后容器: {addr}")
+                wait_ready(addr)
+                break
+            log(f"  重开 start 重试 {attempt + 1}/3")
+            time.sleep(10)
 
     seen = set()
     flags_found = []
@@ -1131,16 +1210,25 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         for p in FLAG_PATHS:
             seen.add(base_url + p)
         if type_key == "android":
-            # android 题：容器首页是 APK 附件，跳过文本端点探测，预下载 APK 供 LLM 分析
+            # android 题：容器首页是 APK 附件，跳过文本端点探测，预下载 APK 供 LLM 分析（大小限制防磁盘爆）
             apk_path = os.path.join(workdir, "app.apk")
             try:
-                urllib.request.urlretrieve(base_url, apk_path, timeout=30)
-                size = os.path.getsize(apk_path)
+                MAX_APK = 200 * 1024 * 1024  # 200MB 上限
+                with urllib.request.urlopen(base_url, timeout=30) as r:
+                    clen = int(r.headers.get("Content-Length") or 0)
+                    if clen > MAX_APK:
+                        raise ValueError(f"APK 过大（{clen // 1024 // 1024}MB > 200MB）")
+                    data = r.read(MAX_APK + 1)
+                if len(data) > MAX_APK:
+                    raise ValueError("APK 超过 200MB")
+                with open(apk_path, "wb") as f:
+                    f.write(data)
+                size = len(data)
                 enum_summary = [f"容器首页是 APK 附件，已预下载到 {apk_path}（{size} 字节）。"
                                 f"用 python androguard 或 unzip 分析（DEX/资源/字符串），找 flag/硬编码 key/API 端点。"]
                 log(f"  android 预下载 APK: {size} 字节")
             except Exception as e:
-                enum_summary = [f"容器首页应提供 APK 附件，预下载失败（{e}），请 LLM 自行 curl 下载。"]
+                enum_summary = [f"容器首页应提供 APK 附件，预下载失败（{e}），请 LLM 自行 curl 下载（注意大小）。"]
         else:
             quick = quick_flag_probe(base_url)
             if quick:
@@ -1206,7 +1294,10 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             switches = 0  # 有进展重置
         else:
             no_progress_streak += 1
-            if hint_text is None and no_progress_streak >= CONFIG["hint_on_stall"] and switches >= 1 and time_left() > 300:
+            if (hint_text is None and no_progress_streak >= CONFIG["hint_on_stall"]
+                    and switches >= CONFIG["stall_switch_limit"] and time_left() > 300
+                    and difficulty != "easy"  # easy 题不用 hint（扣分性价比低）
+                    and sum(1 for h in _hist[-3:] if ("无有效输出" in h or "格式错误" in h)) < 2):  # 格式空转时不取（hint 白给）
                 # 卡住 → 取平台 hint（扣分但保底破题——得分率优先的最后保险；剩余 <5min 不白取）
                 h = fetch_hint(unique_code)
                 if h:
@@ -1328,37 +1419,52 @@ def main():
         else:
             _PACE_MODE = "normal"
 
+    HARD_FUTURE_TIMEOUT = 2700  # 单题硬超时兜底（45min：预算 30min + 重开/就绪/下载余量）——防 worker 卡死拖垮全局
+
     def run_pass(chs, pass_no, extra_hint=None):
         with ThreadPoolExecutor(max_workers=max(1, _current_concurrent)) as ex:
             futs = {ex.submit(solve_challenge, ch, pass_no, extra_hint): ch for ch in chs}
-            for i, fut in enumerate(as_completed(futs), 1):
-                ch = futs[fut]
-                try:
-                    r, won, total, elapsed = fut.result()
-                except Exception as e:
-                    r, won, total, elapsed = "failed", 0, 1, 0
-                    log(f"✗ {ch['unique_code']} 异常: {e}")
-                if r == "task_ended":
-                    log("任务已结束，退出")
-                    return True
-                stats[r if r in stats else "failed"] += 1
-                # score 按实际 flag 数折算（partial 只计已得部分——多 flag 题 1/3 就是 1/3 分）
-                stats["score"] += int(ch.get("total_score", 0) * (won / total if total else 1))
-                elapsed_map[ch["unique_code"]] = elapsed  # 快速失败优先数据源
-                if r == "partial":
-                    partials.append(ch)
-                elif r in ("no_flag", "failed"):
-                    # failed（异常）也重开再打——异常可能是一次性抖动
-                    no_flags.append(ch)
-                # D：重开成功率统计（pass ≥ 2）
-                if pass_no >= 2:
-                    with _ADAPT_LOCK:
-                        s = _RETRY_STATS.setdefault(pass_no, {"tried": 0, "solved": 0})
-                        s["tried"] += 1
-                        s["solved"] += 1 if r in ("solved", "partial") else 0
-                update_pace()
-                log(f"({i}/{len(chs)} 本轮) {ch['unique_code']} → {r}（{won}/{total} flag）| "
-                    f"累计: {stats} | 模式: {_PACE_MODE}")
+            ch_of = {f: ch for f, ch in futs.items()}
+            i = 0
+            while futs:
+                done, futs = wait(futs, timeout=HARD_FUTURE_TIMEOUT, return_when=FIRST_COMPLETED)
+                if not done:
+                    # future 硬超时（极端情况：solve_challenge 内部兜底全部失效）→ 取消并退出本轮
+                    log("⚠ future 硬超时（45min），取消剩余任务")
+                    for f in futs:
+                        f.cancel()
+                    break
+                for fut in done:
+                    i += 1
+                    ch = ch_of[fut]
+                    try:
+                        r, won, total, elapsed = fut.result()
+                    except Exception as e:
+                        r, won, total, elapsed = "failed", 0, 1, 0
+                        log(f"✗ {ch['unique_code']} 异常: {e}")
+                    if r == "task_ended":
+                        log("任务已结束，退出")
+                        return True
+                    stats[r if r in stats else "failed"] += 1
+                    # score 按实际 flag 数折算（partial 只计已得部分——多 flag 题 1/3 就是 1/3 分）
+                    stats["score"] += int(ch.get("total_score", 0) * (won / total if total else 1))
+                    elapsed_map[ch["unique_code"]] = elapsed  # 快速失败优先数据源
+                    if r == "partial":
+                        partials.append(ch)
+                    elif r in ("no_flag", "failed"):
+                        # failed（异常）也重开再打——异常可能是一次性抖动
+                        no_flags.append(ch)
+                    update_type_solve(ch.get("description") or "", ch.get("unique_code", ""),
+                                      r in ("solved", "partial"))
+                    # D：重开成功率统计（pass ≥ 2）
+                    if pass_no >= 2:
+                        with _ADAPT_LOCK:
+                            s = _RETRY_STATS.setdefault(pass_no, {"tried": 0, "solved": 0})
+                            s["tried"] += 1
+                            s["solved"] += 1 if r in ("solved", "partial") else 0
+                    update_pace()
+                    log(f"({i}/{len(chs)} 本轮) {ch['unique_code']} → {r}（{won}/{total} flag）| "
+                        f"累计: {stats} | 模式: {_PACE_MODE}")
         return False
 
     # 第一轮：全部待解题（动态并发）
@@ -1369,20 +1475,25 @@ def main():
         if ended:
             break
         sweep = pick_sweep_candidates(partials, no_flags, wall_left(), elapsed_map)
-        if pass_no >= 3 and sweep:
-            # D：第 3 轮决策基于第 2 轮实际解决率（自适应，不盲目重开）
-            s2 = _RETRY_STATS.get(2, {"tried": 0, "solved": 0})
-            rate = s2["solved"] / s2["tried"] if s2["tried"] else 1.0
-            if s2["tried"] >= 3 and rate < CONFIG["retry_solved_lo"]:
+        if sweep:
+            # D 决策提前到 pass 2：基于上一轮实际解决率（自适应，不盲目重开）
+            prev = pass_no - 1
+            sp = _RETRY_STATS.get(prev, {"tried": 0, "solved": 0})
+            rate = sp["solved"] / sp["tried"] if sp["tried"] else 1.0
+            if sp["tried"] >= 3 and rate < CONFIG["retry_solved_lo"]:
                 sweep = list(partials)  # 重开基本无效 → 只追 partial（确定性收益）
-                log(f"  📉 第 2 轮重开解决率 {rate:.0%} < {CONFIG['retry_solved_lo']:.0%} → 第 3 轮只打 partial")
-            elif s2["tried"] >= 3 and rate < CONFIG["retry_solved_hi"]:
-                sweep = list(partials) + [c for c in sweep if c["unique_code"] not in {p["unique_code"] for p in partials}][:max(1, len(sweep) // 2)]
-                log(f"  📊 第 2 轮重开解决率 {rate:.0%} → 第 3 轮裁剪为前 50%")
+                log(f"  📉 上一轮重开解决率 {rate:.0%} < {CONFIG['retry_solved_lo']:.0%} → 本轮只打 partial")
+            elif sp["tried"] >= 3 and rate < CONFIG["retry_solved_hi"]:
+                non_partial = [c for c in sweep if c["unique_code"] not in {p["unique_code"] for p in partials}]
+                sweep = list(partials) + non_partial[:max(1, len(non_partial) // 2)]
+                log(f"  📊 上一轮重开解决率 {rate:.0%} → 本轮 no_flag 裁剪为前 50%")
+            # 类型解决率过滤：低成功率的题型（如 f2 逆向）不重复重开（已知死路）
+            sweep = [c for c in sweep if c["unique_code"] in {p["unique_code"] for p in partials}
+                     or type_solve_rate(c.get("description") or "", c.get("unique_code", "")) >= 0.2]
         if not sweep:
-            log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟不足或名单为空，跳过第{['', '二', '三'][pass_no]}轮 sweep")
+            log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟不足或名单为空，跳过第{['', '二', '三'][pass_no - 1]}轮 sweep")
             break
-        log(f"▶ 第{['', '二', '三'][pass_no]}轮 sweep：{len(sweep)} 道（partial 优先 + ROI 裁剪），"
+        log(f"▶ 第{['', '二', '三'][pass_no - 1]}轮 sweep：{len(sweep)} 道（partial 优先 + ROI + 类型成功率），"
             f"剩余 {wall_left() / 60:.0f} 分钟")
         hint = ("该题上一轮未完全解出（部分得分或已尝试多轮）。容器已重置，"
                 "请按新环境重新枚举，重点换攻击面（不同漏洞类/端点/协议/账号）。"

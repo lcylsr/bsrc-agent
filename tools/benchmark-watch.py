@@ -20,6 +20,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -78,21 +79,27 @@ def api_fetch(base, token, timeout=20):
         return 0, {"message": str(e)}
 
 
-# 题型关键词（与 solve.py TYPE_RULES 同思路的轻量版；watch 只用于显示排序）
+# 题型关键词（与 solve.py TYPE_RULES 同步；watch 只用于显示排序，保持执行/显示顺序一致）
 WATCH_TYPE_FACTOR = [
     ("cloud",    ["aws", "azure", "云", "cloud", "s3", "oss", "cos", "bucket", "对象存储",
-                  "storage", "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio"], 0.5),
-    ("reverse",  ["license", "授权", "serial", "序列号", "crack", "逆向", "keygen",
-                  "校验器", "验证器", "embedded", "嵌入式", "activation"], 2.0),
-    ("memsafe",  ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat",
+                  "storage", "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio", "ceph"], 0.5),
+    ("android",  ["android", "apk", "dex", "安卓", "移动", "deep link", "社区 app", "app 附件"], 1.5),
+    ("chain",    ["合约", "rpc", "ethereum", "以太坊", "solidity", "区块链", "web3", "issolved",
+                  "抽奖", "私钥", "contract", "blockchain"], 1.5),
+    ("ai",       ["大模型", "llm", "模型", "prompt", "提示注入", "教练", "生成平台", "文档解析",
+                  "ai 面试", "ai 前端", "chat", "对话网站"], 1.2),
+    ("reverse",  ["license", "授权", "serial", "序列号", "crack", "逆向", "reverse", "keygen",
+                  "校验器", "验证器", "embedded", "嵌入式", "activation", "激活", "macos", "ios"], 2.0),
+    ("memsafe",  ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat", "心跳",
                   "lru", "cache", "缓存", "内存", "memory", "tls", "格式串", "字节"], 1.5),
-    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail"], 0.7),
-    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "拦截"], 0.7),
+    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail", "isolat"], 0.7),
+    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "拦截", "网关"], 0.7),
     ("product",  ["泛微", "weaver", "shiro", "log4j", "fastjson", "spring", "weblogic",
-                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "cve"], 1.2),
-    ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "smb", "多阶段", "企业"], 3.0),
+                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "cve", "spring boot"], 1.2),
+    ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "smb", "多阶段", "企业",
+                  "internal", "lateral", "fleet", "pivot", "enterprise"], 3.0),
     ("web",      ["login", "登录", "php", "jsp", "web", "blog", "博客", "cms", "admin",
-                  "api", "idor", "upload", "上传", "越权", "注入"], 1.0),
+                  "api", "idor", "upload", "上传", "越权", "注入", "portal", "forum", "论坛", "商城", "社区"], 1.0),
 ]
 def roi_order(ch):
     """动态 ROI 显示排序（低投入高确定性先显示；与 solve.py build_queue 同思路）。"""
@@ -102,13 +109,15 @@ def roi_order(ch):
     hits = [(sum(1 for k in kws if k in desc_l), tf_) for _, kws, tf_ in WATCH_TYPE_FACTOR]
     hits = [h for h in hits if h[0] > 0]
     if hits:
-        tf = max(hits, key=lambda h: h[0])[1]
+        # 与 solve.py detect_type 同规则：命中数优先，打平时因子大的类型优先
+        hits.sort(key=lambda h: (-h[0], -h[1]))
+        tf = hits[0][1]
     else:
-        # 无描述时前缀 fallback（与 solve.py PREFIX_FALLBACK 同表）
+        # 无描述时前缀 fallback（与 solve.py 同表；前缀后必须跟 - 或数字——"b-01" 匹配，"bctf-01" 不匹配）
         PREFIX_TF = {"d": 0.5, "f1": 1.5, "f2": 2.0, "e1": 0.7, "e2": 0.7, "e3": 0.7,
                      "c": 1.2, "b": 3.0, "a": 1.0}
         for prefix, ftf in PREFIX_TF.items():
-            if code.startswith(prefix):
+            if re.match(rf"^{re.escape(prefix)}[-_0-9]", code):
                 tf = ftf
                 break
     diff = {"easy": 3, "medium": 8, "hard": 20}.get(ch.get("difficulty"), 10)

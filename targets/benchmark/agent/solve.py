@@ -657,7 +657,8 @@ def detect_type(desc, code=""):
         if n > 0:
             hits.append((n, key, tf))
     if hits:
-        hits.sort(key=lambda h: -h[0])
+        # 命中数优先；打平时耗时因子大的类型优先（更特殊/更相关，如 multi 压倒 product）
+        hits.sort(key=lambda h: (-h[0], -h[2]))
         return hits[0][1], hits[0][2]
     for prefix, key in PREFIX_FALLBACK.items():
         # 前缀后必须跟 - 或数字（"b-01" 匹配，"bctf-01" 不匹配——避免 bctf 系列误判成 multi）
@@ -1042,8 +1043,8 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             switches = 0  # 有进展重置
         else:
             no_progress_streak += 1
-            if hint_text is None and no_progress_streak >= HINT_ON_STALL and switches >= 1:
-                # 卡住 → 取平台 hint（扣分但保底破题——得分率优先的最后保险）
+            if hint_text is None and no_progress_streak >= HINT_ON_STALL and switches >= 1 and time_left() > 300:
+                # 卡住 → 取平台 hint（扣分但保底破题——得分率优先的最后保险；剩余 <5min 不白取）
                 h = fetch_hint(unique_code)
                 if h:
                     hint_text = h

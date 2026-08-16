@@ -1048,7 +1048,7 @@ def build_playbook(kb_text, dead_text, desc, code):
     return PLAYBOOK + hints + extra
 
 
-def compact_history(history, round_i):
+def compact_history(history):
     """重组轮：把全部历史注入（不只最近 10 条），早期条目去重压缩成摘要。
     难题的关键线索（早期响应头/参数）不再被挤出上下文——让 LLM 退一步看全局。"""
     if not history:
@@ -1091,7 +1091,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             f"工作目录: {workdir or '/tmp'}（把 python/shell 脚本保存到这里，后续轮次可复用）\n"
             + (f"补充要求: {extra_prompt}\n" if extra_prompt else "")
             + f"已收集信息（仅供参考，你可自行探测任何新方向/新端点/新思路，不受此清单限制）:\n"
-            + "\n".join(compact_history(history, i)) + "\n"
+            + "\n".join(compact_history(history)) + "\n"
             '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）\n'
             '【输出格式（每轮必须遵守，这是模板）：\n'
             f'[{{"type":"bash","command":"curl -s {base_url}/"}},{{"type":"http","method":"GET","url":"{base_url}/robots.txt"}}]\n'
@@ -1587,8 +1587,8 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             no_progress_streak = max(0, no_progress_streak - 1)
         else:
             no_progress_streak += 1
-        # 难题持续借支：hard 题无进展时从时间池持续借（每轮最多借预算 30%），上限 90 分钟
-        if difficulty == "hard" and no_progress_streak >= 1 and time_budget < 5400:
+        # 难题持续借支：hard 题预算将尽时（无论是否无进展）从时间池持续借，上限 90 分钟
+        if difficulty == "hard" and time_left() < time_budget * 0.3 and time_budget < 5400:
             extra_borrow = pool_borrow(time_budget * 0.3)
             if extra_borrow > 60:
                 time_budget += extra_borrow

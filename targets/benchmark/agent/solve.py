@@ -728,6 +728,10 @@ def detect_protocol(base_url, addr):
         p = 80
     resp = tcp_req(host, p, ["HELP", "STATUS", ""], timeout=5)
     if resp and "无响应" not in resp and "错误" not in resp and "TCP 错误" not in resp:
+        # 已知协议 banner（SSH/FTP/HTTP）→ service（避免行协议模式误判）
+        rl = resp.lower()
+        if "ssh-" in rl or "ftp" in rl and "220" in rl or rl.startswith("http"):
+            return "service"
         return "tcp"
     return "unknown"
 
@@ -1400,6 +1404,20 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     elif mode == "reverse":
         enum_summary = [f"该容器是嵌入式授权/序列号校验服务（{addr}）。"
                         f"用 bash 下载二进制（curl 首页/描述路径）→ file/strings/objdump -d/gdb/ltrace 分析校验逻辑 → z3 求解。"]
+        # 预下载二进制（黑盒 reverse 服务首页常直接返回可执行文件）
+        bin_path = os.path.join(workdir, "bin")
+        try:
+            with urllib.request.urlopen(base_url, timeout=20) as r:
+                clen = int(r.headers.get("Content-Length") or 0)
+                if 0 < clen <= 50 * 1024 * 1024:  # 50MB 上限
+                    data = r.read(50 * 1024 * 1024 + 1)
+                    if len(data) <= 50 * 1024 * 1024 and not data[:4].lstrip().startswith(b"<"):
+                        with open(bin_path, "wb") as f:
+                            f.write(data)
+                        enum_summary.append(f"已预下载二进制到 {bin_path}（{len(data)} 字节）——直接 file/strings/objdump 分析。")
+                        log(f"  🎯 reverse 预下载二进制: {len(data)} 字节")
+        except Exception as e:
+            log(f"  reverse 预下载跳过（{e}）")
         log(f"  🎯 模式: 二进制逆向（黑盒端口信号）")
         mode = "reverse"
     else:
@@ -1478,7 +1496,8 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             submit_all(unique_code, flags_found, submitted, rejected)
 
     # ── 黑盒增强：指纹 → 技术栈 hints + 端口信号 + nuclei 已知 CVE（无描述时替代 detect_type） ──
-    if mode == "http" and (not enum_summary or "技术栈指纹命中" not in "".join(enum_summary)):
+    # service 模式（21/23/6379/3306）也注入 port_hint（LLM 需要知道这是 FTP/Redis）
+    if mode in ("http", "service") and (not enum_summary or "技术栈指纹命中" not in "".join(enum_summary)):
         tech_hints = fingerprint_tech(base_url)
         if tech_hints:
             enum_summary.insert(0, "技术栈指纹命中：\n" + "\n".join(tech_hints))
@@ -1487,6 +1506,10 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         if ph and not tech_hints:
             enum_summary.insert(0, ph)
             log(f"  🎯 端口信号: {ph[:60]}...")
+        elif ph and mode == "service":
+            # service 模式（FTP/Redis/MySQL 等）：port_hint 是唯一引导，无条件注入
+            enum_summary.insert(0, ph)
+            log(f"  🎯 服务信号: {ph[:60]}...")
         if pass_no == 1 and not tech_hints:
             n_hits = nuclei_scan(base_url)
             if n_hits:

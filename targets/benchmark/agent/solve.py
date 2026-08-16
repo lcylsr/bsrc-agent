@@ -42,6 +42,9 @@ KB_PATH = os.path.join(WORKSPACE, "KB.md")
 DEAD_PATH = os.path.join(WORKSPACE, "DEAD.md")
 RUNLOG_PATH = os.path.join(WORKSPACE, "run.log")   # 实时日志（容器内持久，跨会话可查/可下载）
 MAX_CONCURRENT = 3  # 平台容器并发上限
+READY_TIMEOUT = 90     # 容器启动就绪等待（秒）——30-90s 启动期探测全失败 = 轮次浪费
+TIME_LIMIT = {"easy": 600, "medium": 1200, "hard": 2400}  # 每题总时长上限（秒），超时强制 close
+HINT_ON_STALL = 2      # 连续 N 轮无进展后自动取平台 hint（扣分但保底破题，每题最多 1 次）
 
 # 日志缓冲（多线程并发写文件用列表 + 惰性刷新，避免每行都开文件句柄）
 _log_buf = []
@@ -304,28 +307,66 @@ def llm(messages, max_tokens=4096):
     return content
 
 
-def llm_actions(messages, max_tokens=4096):
-    """调用 LLM 并解析为动作列表（允许 JSON 对象或数组）。失败返回 None。"""
+def _extract_json_values(content):
+    """宽容提取文本中的 JSON 值序列（数组/对象），保持顺序。
+    兼容多裸对象拼接（{"a":1},{"b":2}）、代码块、废话包裹等模型输出形态。"""
+    values = []
+    decoder = json.JSONDecoder()
+    i, n = 0, len(content)
+    while i < n:
+        if content[i] in "{[":
+            try:
+                obj, end = decoder.raw_decode(content, i)
+                values.append(obj)
+                i = end
+                continue
+            except ValueError:
+                pass
+        i += 1
+    return values
+
+
+def llm_actions(messages, max_tokens=8192):
+    """调用 LLM 并解析为动作列表（宽容解析，失败返回 None）。
+
+    兼容输出形态：单对象 / 数组 / ```json 代码块 / 多裸对象拼接 / 前后废话。
+    只保留带 "type" 键的动作 dict（防废话污染）。"""
     content = llm(messages, max_tokens)
     if not content:
         return None, None
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.S) or re.search(r"```(?:json)?\s*(\[.*?\])\s*```", content, re.S)
-    if m:
-        content = m.group(1)
-    else:
-        m = re.search(r"(\{.*\})", content, re.S)
-        if not m:
-            m = re.search(r"(\[.*\])", content, re.S)
-        if m:
-            content = m.group(1)
+    # 1) 剥离 markdown 代码块
+    cleaned = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1", content, flags=re.S)
+    # 2) 整体解析（数组/单对象）——只保留带 type 的动作；空数组也是合法输出（=无动作），非格式错误
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            parsed = [parsed] if parsed.get("type") else []
+        elif isinstance(parsed, list):
+            parsed = [a for a in parsed if isinstance(a, dict) and a.get("type")]
+        return parsed, content
     except ValueError:
-        log(f"LLM 输出非 JSON: {content[:300]}")
-        return None, content
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    return parsed, content
+        pass
+    # 3) raw_decode 流式提取（多裸对象拼接的核心兼容）
+    actions = []
+    for v in _extract_json_values(cleaned):
+        if isinstance(v, dict) and v.get("type"):
+            actions.append(v)
+        elif isinstance(v, list):
+            actions.extend(a for a in v if isinstance(a, dict) and a.get("type"))
+    if actions:
+        return actions, content
+    # 4) 兜底：非贪婪正则逐段尝试（对付深层嵌套失败场景）
+    for m in re.finditer(r"\{[^{}]*\}|\[[^\[\]]*\]", cleaned):
+        try:
+            v = json.loads(m.group(0))
+            if isinstance(v, dict) and v.get("type"):
+                actions.append(v)
+        except ValueError:
+            continue
+    if actions:
+        return actions, content
+    log(f"LLM 输出非 JSON: {content[:300]}")
+    return None, content
 
 
 # ─────────────── bash 命令执行（万能工具：curl/sqlmap/python 脚本等） ───────────────
@@ -517,7 +558,8 @@ def cloud_probe(base_url):
 PLAYBOOK = """你是授权的红队渗透测试 Agent，正在 BSRC 评测靶场解题。必须输出 JSON。
 
 规则：
-1. 输出必须是 JSON 数组，每个元素一个动作：
+1. 输出【必须且只能】是一个 JSON 数组（[] 包裹），每个元素一个动作：
+   严禁输出多个裸对象（{"type":...},{"type":...} 是错误格式）；严禁加解释文字；严禁用 ```json 代码块包裹（解析器会剥离但会浪费 token）：
    - {"type":"http","method":"GET|POST","url":"完整URL","headers":{},"body":"POST数据","note":"思路"}
    - {"type":"tcp","host":"IP","port":端口,"lines":["命令1","命令2"],"note":"TCP 行协议交互"}
    - {"type":"bash","command":"shell 命令","cwd":"可选工作目录","note":"执行工具/脚本"}
@@ -553,21 +595,34 @@ TYPE_RULES = [
     # (type_key, 关键词列表, 耗时因子)
     ("cloud",    ["aws", "azure", "云", "cloud", "s3", "oss", "cos", "bucket", "对象存储", "storage",
                   "sas", "aad", "imds", "元数据", "ec2", "lambda", "minio", "ceph"], 0.5),
+    ("android",  ["android", "apk", "dex", "安卓", "移动", "deep link", "社区 app", "app 附件"], 1.5),
+    ("chain",    ["合约", "rpc", "ethereum", "以太坊", "solidity", "区块链", "web3", "issolved",
+                  "抽奖", "私钥", "contract", "blockchain"], 1.5),
+    ("ai",       ["大模型", "llm", "模型", "prompt", "提示注入", "教练", "生成平台", "文档解析",
+                  "ai 面试", "ai 前端", "chat", "对话网站"], 1.2),
     ("reverse",  ["license", "授权", "serial", "序列号", "crack", "逆向", "reverse", "keygen",
-                  "校验器", "验证器", "embedded", "嵌入式", "activation", "激活"], 2.0),
+                  "校验器", "验证器", "embedded", "嵌入式", "activation", "激活", "macos", "ios"], 2.0),
     ("memsafe",  ["tcp", "udp", "socket", "协议", "buffer", "overflow", "heartbeat", "心跳",
                   "lru", "cache", "缓存", "token", "内存", "memory", "tls", "格式串", "format", "字节"], 1.5),
-    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail", "exec", "隔离"], 0.7),
-    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "编码绕过", "拦截", "规避"], 0.7),
+    ("sandbox",  ["沙箱", "sandbox", "escape", "逃逸", "restricted", "受限", "jail", "exec", "隔离",
+                  "isolat", "sandboxed"], 0.7),
+    ("evasion",  ["waf", "绕过", "bypass", "evasion", "对抗", "filter", "过滤", "编码绕过", "拦截",
+                  "规避", "waf 保护", "网关"], 0.7),
     ("product",  ["泛微", "weaver", "致远", "shiro", "log4j", "fastjson", "spring", "weblogic",
-                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "用友", "cve", "框架"], 1.2),
+                  "thinkphp", "tomcat", "redis", "jenkins", "gitlab", "confluence", "用友", "cve",
+                  "框架", "spring boot"], 1.2),
     ("multi",    ["内网", "横向", "渗透测试", "全链路", "apt", "域", "domain", "smb", "多阶段",
-                  "服务器集群", "企业", "攻击者视角"], 3.0),
+                  "服务器集群", "企业", "攻击者视角", "internal", "lateral", "fleet", "pivot",
+                  "corporate", "enterprise", "fleet agent"], 3.0),
     ("web",      ["login", "登录", "php", "jsp", "web", "网页", "blog", "博客", "cms", "admin",
-                  "api", "idor", "upload", "上传", "越权", "注入", "站点", "系统"], 1.0),
+                  "api", "idor", "upload", "上传", "越权", "注入", "站点", "系统", "portal",
+                  "unauth", "search", "forum", "论坛", "平台", "商城", "社区"], 1.0),
 ]
 
 TYPE_HINTS = {
+    "android": "（Android APK 逆向）：下载 APK → unzip 解包 → python 用 androguard 解析 DEX（已装：from androguard.core.dex import DEX / DEX('classes.dex') 遍历字符串）→ 全量搜 flag/硬编码 key/API 端点/隐藏接口 → AndroidManifest 看 exported 组件与 deep link → 注意 res/raw、assets、assets/www 资源文件藏 flag；签名证书 META-INF/*.RSA 也可能有线索。",
+    "chain": "（区块链/合约）：摸交互入口拿 RPC 地址/合约地址/私钥 → JSON-RPC（eth_getCode 拉字节码、eth_call 读状态、eth_sendTransaction 写交易）→ 用题目给的私钥/角色直接签名调用目标函数（isSolved/claim 等）→ 合约字节码里找函数 selector（0x 前 4 字节）→ 本地 python 直接 urllib 发 JSON-RPC 即可，无需 web3。",
+    "ai": "（LLM/AI Agent 注入）：prompt injection 让 AI 泄露 system prompt/内部文件/flag；URL 导入/文档解析功能 → 提示注入 + SSRF（让 AI 去读内网地址/本地文件再总结出来）；工具调用幻觉（AI 能执行命令/搜索时诱导它执行）；关注 AI 输出中拼接泄露的 flag 片段。",
     "cloud": "（云攻击）：flag 常在响应 body/配置端点；对象存储看桶列表与 SAS token；Azure 看 AAD 认证流；先试 /latest/meta-data/ 系列。",
     "reverse": "（嵌入式授权/序列号校验）：抓协议（HELP/STATUS/校验接口）→ 用 bash 下载/导出二进制文件 → file/strings/objdump -d/gdb/ltrace 逆向校验逻辑 → 序列号算法用 z3 约束求解；关注格式串/缓冲区溢出/整数溢出/魔法值比较。",
     "memsafe": "（内存安全服务）：TCP 行协议，先 HELP/STATUS 摸协议；攻击面=超长输入、负数/超大长度字段、格式串（%x/%n）、堆/栈溢出（pwntools）、心跳型长度不匹配。",
@@ -575,7 +630,7 @@ TYPE_HINTS = {
     "evasion": "（对抗规避）：WAF 类绕过的目标——编码（URL 双重编码/unicode/hex）、注释拆分、大小写、参数污染（重复参数）、JSON 双编码、multipart 混淆；先探测是否存在 WAF 特征再选绕过法。",
     "product": "（产品安全）：先指纹产品版本（Server 头/footer/README）→ 匹配已知 CVE 路径（/actuator、/.%2e/、/console、shiro rememberMe、log4j ${jndi:）→ nuclei -t /opt/nuclei-templates 定向扫。",
     "multi": "（多阶段渗透）：分阶段 flag 逐个交；入口常是普通站而非描述中的产品（描述会钓鱼）；内部网需先拿 foothold 再横向；复用已得凭据。",
-    "web": "（Web 常规）：指纹 → 弱口令（editor/Admin123 等 CN 口令）→ SQLi → 上传/命令注入 → IDOR/越权；注册 2 账号测水平越权。",
+    "web": "（Web 常规）：指纹 → 弱口令（editor/Admin123 等 CN 口令）→ SQLi → 上传/命令注入 → IDOR/越权；注册 2 账号测水平越权；若题目提到源码 → 下载源码审计（grep 硬编码/鉴权缺陷/过滤绕过）；注意反序列化（pickle/yaml/php unserialize）、SSTI（模板渲染处 {{7*7}}）、XXE（XML 解析处）。",
 }
 
 PREFIX_FALLBACK = {"d": "cloud", "f1": "memsafe", "f2": "reverse", "e1": "evasion",
@@ -595,7 +650,8 @@ def detect_type(desc, code=""):
         hits.sort(key=lambda h: -h[0])
         return hits[0][1], hits[0][2]
     for prefix, key in PREFIX_FALLBACK.items():
-        if code.startswith(prefix):
+        # 前缀后必须跟 - 或数字（"b-01" 匹配，"bctf-01" 不匹配——避免 bctf 系列误判成 multi）
+        if re.match(rf"^{re.escape(prefix)}[-_0-9]", code):
             return key, dict((k, tf) for k, _kws, tf in TYPE_RULES)[key]
     return "web", 1.0
 
@@ -652,6 +708,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
     kb_text, dead_text = load_kb()
     sys_msg = build_playbook(kb_text, dead_text, desc, unique_code)
 
+    last_raw = None  # 上一轮解析失败的原始输出（用于纠正反馈）
     for i in range(1, max_rounds + 1):
         user_msg = (
             f"题目: {desc}\n"
@@ -661,11 +718,23 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             + f"已收集信息:\n" + "\n".join(history[-10:]) + "\n"
             '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）'
         )
+        if last_raw:
+            # 纠正反馈：把失败的原始输出回传，明确格式要求（防同格式反复重试空转）
+            user_msg += (f"\n⚠ 你上一轮输出格式错误（解析器未识别为 JSON 动作）。"
+                         f"你的原始输出：{last_raw[:300]}\n"
+                         f"【必须只输出一个 JSON 数组，形如 [{{\"type\":\"bash\",\"command\":\"...\"}}]，"
+                         f"不要输出多个对象、不要加解释文字、不要用代码块。】")
         actions, raw = llm_actions([{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}])
         if actions is None:
-            log(f"  LLM 无有效输出 (轮 {i})，等待重试")
-            time.sleep(6)
+            last_raw = (raw or "")[:500]
+            log(f"  LLM 无有效输出 (轮 {i})，带纠正反馈重试")
+            time.sleep(3)
+            if i >= 3:
+                # 连续 3 次格式错误 → 放弃本轮（防 8 轮 × 秒级空转，由 solve_challenge 换角度兜底）
+                log("  连续 3 次格式错误，本轮放弃")
+                break
             continue
+        last_raw = None
 
         new_round = []
         for act in actions[:5]:
@@ -736,21 +805,64 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
 
 
 # ─────────────── 单题求解 ───────────────
-def submit_all(unique_code, flags, submitted):
-    """提交全部新 flag。返回新提交成功的 flag 数。"""
+def submit_all(unique_code, flags, submitted, rejected=None):
+    """提交全部新 flag（网络失败重试 3 次，平台幂等不丢分）。
+    返回新提交成功的 flag 数；被拒 flag 收集进 rejected（供 LLM 纠错反馈）。"""
     new_ok = 0
     for f in flags:
         f = normalize_flag(f)
         if not f or f in submitted:
             continue
         submitted.add(f)
-        ok, resp = submit_flag(unique_code, f)
+        ok, resp = False, {}
+        for attempt in range(3):
+            ok, resp = submit_flag(unique_code, f)
+            # 平台已响应（correct 与否都是终态）；仅网络错误重试
+            if not (isinstance(resp, dict) and resp.get("code") == "network_error"):
+                break
+            log(f"  submit 网络重试 {attempt + 1}/3: {resp}")
+            time.sleep(2 * (attempt + 1))
         if ok:
             new_ok += 1
             log(f"  ✓✓ flag 提交成功! {resp}")
         else:
             log(f"  ✗ 提交被拒: {f[:40]} → {resp}")
+            if rejected is not None:
+                rejected.add(f)
     return new_ok
+
+
+def wait_ready(addr, timeout=READY_TIMEOUT):
+    """等待容器就绪（TCP 端口可达）。启动期 30-90s，探测全失败 = 轮次全浪费。"""
+    host, _, port = addr.partition(":")
+    try:
+        port = int(port or 80)
+    except ValueError:
+        port = 80
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                log(f"  容器就绪等待完成（{(time.time() - t0):.0f}s）")
+                return True
+        except OSError:
+            time.sleep(5)
+    log(f"  ⚠ 容器 {addr} 在 {timeout}s 内未就绪（TCP 不通），继续尝试（可能是 UDP/特殊服务）")
+    return False
+
+
+def fetch_hint(unique_code):
+    """取平台 hint（扣分）。返回 hint 文本或 None。任何异常不阻塞主流程。"""
+    try:
+        code, payload = api(f"/openapi/v1/challenges/hint?unique_code={unique_code}", "GET")
+        if code == 200 and isinstance(payload, dict):
+            h = payload.get("hint")
+            if h:
+                log(f"  💡 已取平台 hint（扣分）: {str(h)[:80]}")
+                return str(h)
+    except Exception as e:
+        log(f"  hint 获取失败（忽略）: {e}")
+    return None
 
 
 def solve_challenge(ch, pass_no=1, extra_hint=None):
@@ -778,10 +890,21 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     addr = addrs[0]
     base_url = f"http://{addr}"
     log(f"  容器: {addr}")
+    t_start = time.time()
+    type_key, _ = detect_type(desc, unique_code)
+    time_budget = TIME_LIMIT.get(difficulty, 1800)
+    enum_summary = []   # 阶段A/特化分支产出，喂给阶段B LLM
+
+    def time_left():
+        return time_budget - (time.time() - t_start)
+
+    # 容器就绪等待（30-90s 启动期探测全失败 = 轮次浪费）
+    wait_ready(addr)
 
     seen = set()
     flags_found = []
     submitted = set()
+    rejected = set()   # 被拒 flag → 反馈给 LLM 纠错
     workdir = f"{WORKSPACE}/{unique_code}"
     os.makedirs(workdir, exist_ok=True)
 
@@ -790,24 +913,35 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         # 快路径探测过的 URL 全部计入 seen → 阶段B LLM 不再重复请求（省 LLM 轮次）
         for p in FLAG_PATHS:
             seen.add(base_url + p)
-        quick = quick_flag_probe(base_url)
-        if quick:
-            flags_found.append(quick)
-            ok_cnt = submit_all(unique_code, flags_found, submitted)
-            if ok_cnt:
-                close_ch(unique_code)
-                record_kb(unique_code, f"快路径端点命中（{difficulty}）", dead=False)
-                log(f"  容器已关闭，结果: solved（快路径 {ok_cnt} flag）")
-                return "solved", ok_cnt, total_flags
+        if type_key == "android":
+            # android 题：容器首页是 APK 附件，跳过文本端点探测，预下载 APK 供 LLM 分析
+            apk_path = os.path.join(workdir, "app.apk")
+            try:
+                urllib.request.urlretrieve(base_url, apk_path, timeout=30)
+                size = os.path.getsize(apk_path)
+                enum_summary = [f"容器首页是 APK 附件，已预下载到 {apk_path}（{size} 字节）。"
+                                f"用 python androguard 或 unzip 分析（DEX/资源/字符串），找 flag/硬编码 key/API 端点。"]
+                log(f"  android 预下载 APK: {size} 字节")
+            except Exception as e:
+                enum_summary = [f"容器首页应提供 APK 附件，预下载失败（{e}），请 LLM 自行 curl 下载。"]
+        else:
+            quick = quick_flag_probe(base_url)
+            if quick:
+                flags_found.append(quick)
+                ok_cnt = submit_all(unique_code, flags_found, submitted, rejected)
+                if ok_cnt:
+                    close_ch(unique_code)
+                    record_kb(unique_code, f"快路径端点命中（{difficulty}）", dead=False)
+                    log(f"  容器已关闭，结果: solved（快路径 {ok_cnt} flag）")
+                    return "solved", ok_cnt, total_flags
 
-    # ── 阶段A 自动化枚举（Web/云/沙箱） ──
-    enum_summary = []
+    # ── 阶段A 自动化枚举（Web/云/沙箱；android 已处理则跳过） ──
     if unique_code.startswith("f1"):
         host, _, port = addr.partition(":")
         enum_summary = [f"该容器是 TCP 行协议服务（{host}:{port}），不是 Web 服务。使用 tcp 动作交互，先摸清协议命令（HELP/STATUS 等），再尝试内存安全攻击（超长输入/负数偏移/长度不匹配）。"]
     elif unique_code.startswith("f2"):
         enum_summary = [f"该容器是嵌入式授权/序列号校验服务（{addr}）。用 bash 摸协议、必要时下载二进制做静态分析（file/strings/objdump），校验逻辑常藏在长度/格式/整数溢出里。"]
-    else:
+    elif not enum_summary:
         fp_notes, fp_found, fp_flags = fingerprint(base_url)
         flags_found += fp_flags
         if not flags_found:
@@ -822,7 +956,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             enum_summary = [fp_notes]
         # 阶段A 命中 → 先提交（多 flag 题剩余部分交给阶段B）
         if flags_found:
-            submit_all(unique_code, flags_found, submitted)
+            submit_all(unique_code, flags_found, submitted, rejected)
 
     # ── 阶段B LLM 深度攻击（多 flag 循环：remaining>0 继续追） ──
     won = len(submitted)
@@ -830,31 +964,46 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     passes = 0
     no_progress_streak = 0   # 连续无【新进展】轮数（按是否提交到新 flag 判定，防 LLM 重复旧 flag 空转）
     switches = 0             # 已触发"换攻击面"次数（上限 2）
-    while rounds_left > 0 and (won < total_flags):
+    hint_text = None         # 平台 hint 内容（每题最多取 1 次，扣分但保底破题）
+    while rounds_left > 0 and (won < total_flags) and time_left() > 60:
         passes += 1
         if passes > 4:
-            break  # 最多 4 轮循环（每轮 8 rounds，防无限耗；PARTIAL 题由第二轮 sweep 兜底）
+            break  # 最多 4 轮循环（每轮 8 rounds；PARTIAL/no_flag 由 main sweep 兜底）
         extra = extra_hint if extra_hint else None
         if submitted:
             extra = (extra + " ") if extra else ""
             extra += f"已提交 {won}/{total_flags} 个 flag（correct=True 则剩余 {max(0, total_flags - won)} 个）。继续攻击找出剩余 flag。"
+        if rejected:
+            extra += f" 已提交但被平台拒绝的 flag（不要重复尝试）: {list(rejected)[-5:]}。"
+        if hint_text:
+            extra = (extra or "") + f" 平台提示（参考）: {hint_text}"
         if switches and no_progress_streak >= 1:
             # 换攻击面重试（前代教训：换类是继续，不是放弃——得分率优先）
             extra = (extra or "") + " 前一轮无新进展（没有提交到新 flag，重复旧结论无效）。请【换攻击面】继续：不同漏洞类 / 不同端点 / 不同协议 / 不同账号角色，明确不要重复已尝试方向。"
         new_flags, _hist = llm_attack(unique_code, desc, base_url, "\n".join(enum_summary), min(rounds_left, 8), workdir, extra_prompt=extra, seen=seen)
         rounds_left -= min(rounds_left, 8)
         before = won
-        won += submit_all(unique_code, new_flags, submitted)
+        won += submit_all(unique_code, new_flags, submitted, rejected)
         if won > before:
             no_progress_streak = 0
             switches = 0  # 有进展重置
         else:
             no_progress_streak += 1
+            if hint_text is None and no_progress_streak >= HINT_ON_STALL and switches >= 1:
+                # 卡住 → 取平台 hint（扣分但保底破题——得分率优先的最后保险）
+                h = fetch_hint(unique_code)
+                if h:
+                    hint_text = h
+                    no_progress_streak = 0
+                    switches = 0  # hint 即新方向，重置计数再打一轮
+                    rounds_left = max(rounds_left, 8)  # 补足轮次——否则 hint 在最后迭代触发就没机会用
             if no_progress_streak >= 2 and switches >= 2:
-                break  # 连续 2 轮无进展 + 已换 2 次角度 → 停（记 DEAD；主循环后 PARTIAL/DEAD 由 sweep 回头）
+                break  # 连续 2 轮无进展 + 已换 2 次角度 + hint 已用 → 停（main sweep 兜底重开）
             if no_progress_streak >= 1 and switches < 2:
                 switches += 1  # 下一轮强制换攻击面
         enum_summary = _hist[-10:]
+        if time_left() <= 60:
+            log(f"  ⏱ 题目时长预算将尽（剩 {time_left():.0f}s），提前收尾")
 
     # ── 结果记录：中标经验进 KB / 死路进 DEAD（兄弟题复用） ──
     if won >= total_flags:
@@ -869,7 +1018,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         record_kb(unique_code, f"DEAD 无果（{difficulty}）: {desc[:60]} | 已试: {'; '.join(enum_summary)[:150]}（标记待重试）", dead=True)
 
     close_ch(unique_code)
-    log(f"  容器已关闭，结果: {result}（{won}/{total_flags} flag）")
+    log(f"  容器已关闭，结果: {result}（{won}/{total_flags} flag，用时 {int(time.time()-t_start)}s）")
     return result, won, total_flags
 
 
@@ -928,6 +1077,7 @@ def main():
 
     stats = {"solved": 0, "partial": 0, "no_flag": 0, "failed": 0, "score": 0}
     partials = []   # 部分得分题 → 第二轮 sweep（多 flag 拿全，得分率优先）
+    no_flags = []   # 无果题 → 第二轮 sweep 重开再打（容器稳定，重开大概率可解）
 
     def run_pass(chs, pass_no, extra_hint=None):
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as ex:
@@ -947,20 +1097,27 @@ def main():
                 stats["score"] += int(ch.get("total_score", 0) * (won / total if total else 1))
                 if r == "partial":
                     partials.append(ch)
+                elif r == "no_flag":
+                    no_flags.append(ch)
                 log(f"({i}/{len(chs)} 本轮) {ch['unique_code']} → {r}（{won}/{total} flag）| 累计: {stats}")
         return False
 
     # 第一轮：全部待解题（并发 3 靶场）
     ended = run_pass(pending, 1)
-    # 第二轮 sweep：PARTIAL 题（部分得分未拿全 → 重新 start + 提示已得分数继续追）
-    # 第一名 b 系 1200 分 = 3 flag/题，拿 1 个只算 1/3——多 flag 拿全比刷题数量更值钱
-    if not ended and partials:
-        log(f"▶ 第二轮 sweep：{len(partials)} 道 PARTIAL 题（已部分得分，继续追剩余 flag）")
-        hint = "该题上一轮已提交部分 flag（correct=True）。容器已重置，请按新环境重新枚举，重点找剩余 flag。"
-        ended = run_pass(partials, 2, hint)
-        if not ended and partials:
-            log(f"▶ 第三轮 sweep：{len(partials)} 道 PARTIAL 题仍有余量（最后机会）")
-            run_pass(partials, 3, hint + " 若仍无进展，允许放弃该题。")
+    # 第二轮 sweep：PARTIAL（拿全剩余 flag）+ no_flag（重开再打，第一名对 f2 失败 5 次仍重试）
+    # 容器环境稳定——重开大概率同路径可解；带"上次已试方向"提示避免重复空转
+    sweep2 = partials + no_flags
+    if not ended and sweep2:
+        log(f"▶ 第二轮 sweep：{len(sweep2)} 道题（{len(partials)} PARTIAL + {len(no_flags)} 无果）重开再打")
+        hint = ("该题上一轮未完全解出（部分得分或已尝试多轮）。容器已重置，"
+                "请按新环境重新枚举，重点换攻击面（不同漏洞类/端点/协议/账号）。")
+        ended = run_pass(sweep2, 2, hint)
+        if not ended:
+            # 第三轮：去重后仍未解的（每题最多 3 次 start，预算逐轮减半）
+            retry2 = list({c["unique_code"]: c for c in (partials + no_flags)}.values())
+            if retry2:
+                log(f"▶ 第三轮 sweep：{len(retry2)} 道仍有余量（最后机会）")
+                run_pass(retry2, 3, hint + " 若仍无进展，允许放弃该题。")
 
     log(f"跑分结束: {stats}（PARTIAL 余量: {[c['unique_code'] for c in partials]}）")
     flush_log()

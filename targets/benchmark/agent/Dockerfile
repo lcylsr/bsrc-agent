@@ -18,9 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python 漏洞利用/分析库（与运行环境隔离）
+# androguard：纯 python APK/DEX 解析（bctf 安卓题 25% 占比，无需 JRE 的 jadx）
 RUN pip install --no-cache-dir -q \
         requests beautifulsoup4 lxml pyjwt pycryptodome z3-solver dnspython \
-        ddddocr pwntools
+        ddddocr pwntools androguard
 
 COPY solve.py /app/solve.py
 RUN mkdir -p /app/workspace

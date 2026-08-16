@@ -106,6 +106,32 @@ def adaptive_budget(difficulty, type_key):
         return min(base * CONFIG["budget_max_ratio"], max(base * CONFIG["budget_min_ratio"], dynamic))
     return base
 
+
+# ── 时间池（thread-safe）：快题省下的时间给难题借——实时分配的核心 ──
+_time_pool = 0.0
+_time_pool_lock = threading.Lock()
+
+
+def pool_balance():
+    with _time_pool_lock:
+        return _time_pool
+
+
+def pool_earn(seconds):
+    """快题解出后，剩余预算的 pool_save_ratio 存入池子（留安全垫），cap 防无限积累。"""
+    with _time_pool_lock:
+        global _time_pool
+        _time_pool = min(_time_pool + seconds * CONFIG["pool_save_ratio"], CONFIG["time_pool_cap"])
+
+
+def pool_borrow(base_budget):
+    """难题借时间：最多借 base_budget × borrow_ratio，池子不足则借全部。"""
+    with _time_pool_lock:
+        global _time_pool
+        borrow = min(_time_pool, base_budget * CONFIG["borrow_ratio"])
+        _time_pool -= borrow
+        return borrow
+
 # 日志缓冲（多线程并发写文件用列表 + 惰性刷新，避免每行都开文件句柄）
 _log_buf = []
 _LOG_FLUSH_EVERY = 20
@@ -514,14 +540,25 @@ def quick_flag_probe(base_url):
     return None
 
 
+def parallel_req(urls, workers=4, timeout=6, max_body=4000):
+    """并发 HTTP GET（保持输入顺序返回）。阶段A 枚举的 IO 密集请求并行化（每题省 20-40s）。"""
+    results = [None] * len(urls)
+
+    def work(i, u):
+        results[i] = (u,) + http_req("GET", u, timeout=timeout, max_body=max_body)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(lambda p: work(*p), enumerate(urls)))
+    return [r for r in results if r]
+
+
 def fingerprint(base_url):
-    """首页/常见端点指纹：返回 (指纹摘要, 可访问端点列表, 发现的flag)"""
+    """首页/常见端点指纹（并发 4）：返回 (指纹摘要, 可访问端点列表, 发现的flag)"""
     found = []
     flags = []
     notes = []
     probe = [base_url + "/"] + [base_url + d for d in DIRS[:10]]
-    for u in probe:
-        st, hd, body = http_req("GET", u)
+    for u, st, hd, body in parallel_req(probe, workers=4):
         if st == 0:
             continue
         flags += extract_flags(body)
@@ -543,17 +580,15 @@ def fingerprint(base_url):
                     notes.append(f"  链接: {links}")
                 if scripts:
                     notes.append(f"  JS: {scripts}")
-        time.sleep(0.15)
     return "\n".join(notes), found, flags
 
 
 def dir_enum(base_url, limit=50):
-    """目录字典枚举（高价值路径），返回可访问端点 + 发现的 flag"""
+    """目录字典枚举（并发 6），返回可访问端点 + 发现的 flag"""
     found = []
     flags = []
-    for d in DIRS[10:10 + limit]:
-        u = base_url + d
-        st, hd, body = http_req("GET", u)
+    urls = [base_url + d for d in DIRS[10:10 + limit]]
+    for u, st, hd, body in parallel_req(urls, workers=6):
         if st == 0:
             continue
         flags += extract_flags(body)
@@ -561,7 +596,6 @@ def dir_enum(base_url, limit=50):
             found.append(f"{u} [{st}] {len(body)}B")
         elif st in (401, 403):
             found.append(f"{u} [{st}] 需认证/被拒")
-        time.sleep(0.1)
     return found, flags
 
 
@@ -601,12 +635,11 @@ def login_attempt(base_url, login_urls=None):
 
 
 def cloud_probe(base_url):
-    """云题特化：直接 GET 配置/凭据端点"""
+    """云题特化（并发 6）：直接 GET 配置/凭据端点"""
     found = []
     flags = []
-    for p in CLOUD_PATHS:
-        u = base_url + p
-        st, hd, body = http_req("GET", u)
+    urls = [base_url + p for p in CLOUD_PATHS]
+    for u, st, hd, body in parallel_req(urls, workers=6):
         if st == 0:
             continue
         flags += extract_flags(body)
@@ -617,7 +650,6 @@ def cloud_probe(base_url):
                 found.append(f"{u} [{st}] 敏感关键词: {body[:300]}")
             elif st == 200:
                 found.append(f"{u} [{st}] {len(body)}B {body[:200]}")
-        time.sleep(0.1)
     return found, flags
 
 
@@ -942,11 +974,40 @@ def wait_ready(addr, timeout=READY_TIMEOUT):
     return False
 
 
-def pick_sweep_candidates(partials, no_flags, remaining, pass_no):
+def pick_sweep_candidates(partials, no_flags, remaining, elapsed_map=None):
     """时间感知 sweep 名单（模块级，可测）：partial 永远优先；no_flag 按 ROI 取前 K。
-    预算 = 剩余墙钟 × 3 并发（worker-min）；每题耗时上限随 pass 递减（/2）。"""
-    if remaining < 300:
+    预算 = 剩余墙钟 × 3 并发（worker-min）；每题耗时上限 /2（sweep 轮）。
+    elapsed_map：上次用时 → 快速失败（<40% 预算）优先重开（重开成功率更高）。"""
+    if remaining < CONFIG["sweep_min_remaining"]:
         return []  # 剩 <5 分钟不再 sweep
+    budget = remaining * 3 / 60  # worker-min
+    partial_codes = {p["unique_code"] for p in partials}
+    cands = list(partials) + list(no_flags)
+    cands = list({c["unique_code"]: c for c in cands}.values())
+
+    def sort_key(c):
+        code = c["unique_code"]
+        budget_s = TIME_LIMIT.get(c.get("difficulty", "medium"), 900)
+        el = (elapsed_map or {}).get(code)
+        # 三档：partial（确定性收益）> 快速失败（<40% 预算，环境/格式问题，重开成功率高）> 慢失败
+        if code in partial_codes:
+            tier = 0
+        elif el is not None and el < budget_s * 0.4:
+            tier = 1
+        else:
+            tier = 2
+        roi = -(c.get("total_score", 0) / max(c.get("flag_count", 1), 1))
+        return (tier, roi)
+
+    cands.sort(key=sort_key)
+    picked, cost = [], 0.0
+    for c in cands:
+        t = TIME_LIMIT.get(c.get("difficulty", "medium"), 900) / 2 / 60
+        if cost + t > budget:
+            break
+        picked.append(c)
+        cost += t
+    return picked
     budget = remaining * 3 / 60  # worker-min
     partial_codes = {p["unique_code"] for p in partials}
     cands = list(partials) + list(no_flags)
@@ -1020,7 +1081,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
                 log(f"  start 恢复，并发回到 {_current_concurrent}")
             break
         if isinstance(resp, dict) and resp.get("code") == "invalid_state":
-            return "task_ended", 0, 1
+            return "task_ended", 0, 1, int(time.time() - t_start)
         consecutive_fail += 1
         if consecutive_fail >= 3 and _current_concurrent > 1:
             # 连续失败 → 降并发（平台可能被我们占满/限流）
@@ -1030,18 +1091,23 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         time.sleep(backoff)
         backoff = min(backoff * 2, 120)  # 15→30→60→120 指数退避
     if not addrs:
-        return "start_failed", 0, 1
+        return "start_failed", 0, 1, int(time.time() - t_start)
     addr = addrs[0]
     base_url = f"http://{addr}"
     log(f"  容器: {addr}")
     t_start = time.time()
     type_key, _ = detect_type(desc, unique_code)
-    # B 动态预算（实测 EMA）+ C 节奏模式缩放 + sweep 减半
+    # B 动态预算（实测 EMA）+ C 节奏模式缩放 + 时间池借支 + sweep 减半
     time_budget = adaptive_budget(difficulty, type_key)
     if _PACE_MODE == "tight":
         time_budget *= (1 - CONFIG["pace_scale"])
     elif _PACE_MODE == "loose":
         time_budget *= (1 + CONFIG["pace_scale"])
+    if pass_no == 1 and difficulty == "hard":
+        extra_pool = pool_borrow(time_budget)  # 难题第一轮可借池子时间（最多自身 50%）
+        if extra_pool > 60:
+            time_budget += extra_pool
+            log(f"  ⏳ 借时间池 {extra_pool:.0f}s（池余 {pool_balance():.0f}s）")
     if pass_no > 1:
         time_budget = max(240, time_budget // 2)  # sweep 轮预算减半
     enum_summary = []   # 阶段A/特化分支产出，喂给阶段B LLM
@@ -1084,7 +1150,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
                     close_ch(unique_code)
                     record_kb(unique_code, f"快路径端点命中（{difficulty}）", dead=False)
                     log(f"  容器已关闭，结果: solved（快路径 {ok_cnt} flag）")
-                    return "solved", ok_cnt, total_flags
+                    return "solved", ok_cnt, total_flags, int(time.time() - t_start)
 
     # ── 阶段A 自动化枚举（Web/云/沙箱；android 已处理则跳过） ──
     if unique_code.startswith("f1"):
@@ -1170,11 +1236,16 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
 
     elapsed_sec = time.time() - t_start
     update_type_time(type_key, elapsed_sec / 60)  # A：实际耗时回喂经验库（无论解出与否）
+    # 时间池：剩余预算回池（快题省下的时间给难题）
+    remaining = time_budget - elapsed_sec
+    if remaining > 60 and pass_no == 1:
+        pool_earn(remaining)
+        log(f"  时间池 +{remaining * CONFIG['pool_save_ratio']:.0f}s（余量回池，池余 {pool_balance():.0f}s）")
 
     cleanup_workdir(workdir)  # 清理大体积临时文件（APK/解包），防磁盘膨胀
     close_ch(unique_code)
     log(f"  容器已关闭，结果: {result}（{won}/{total_flags} flag，用时 {int(elapsed_sec)}s）")
-    return result, won, total_flags
+    return result, won, total_flags, int(time.time() - t_start)
 
 
 # ─────────────── 自检 & 主循环 ───────────────
@@ -1233,6 +1304,7 @@ def main():
     stats = {"solved": 0, "partial": 0, "no_flag": 0, "failed": 0, "score": 0}
     partials = []   # 部分得分题 → sweep（多 flag 拿全，得分率优先）
     no_flags = []   # 无果题 → sweep 重开再打（容器稳定，重开大概率可解）
+    elapsed_map = {}   # code -> 上次用时（秒）→ sweep 快速失败优先
     t_total_start = time.time()
     total_chs = len(pending)
 
@@ -1262,9 +1334,9 @@ def main():
             for i, fut in enumerate(as_completed(futs), 1):
                 ch = futs[fut]
                 try:
-                    r, won, total = fut.result()
+                    r, won, total, elapsed = fut.result()
                 except Exception as e:
-                    r, won, total = "failed", 0, 1
+                    r, won, total, elapsed = "failed", 0, 1, 0
                     log(f"✗ {ch['unique_code']} 异常: {e}")
                 if r == "task_ended":
                     log("任务已结束，退出")
@@ -1272,6 +1344,7 @@ def main():
                 stats[r if r in stats else "failed"] += 1
                 # score 按实际 flag 数折算（partial 只计已得部分——多 flag 题 1/3 就是 1/3 分）
                 stats["score"] += int(ch.get("total_score", 0) * (won / total if total else 1))
+                elapsed_map[ch["unique_code"]] = elapsed  # 快速失败优先数据源
                 if r == "partial":
                     partials.append(ch)
                 elif r in ("no_flag", "failed"):
@@ -1295,7 +1368,7 @@ def main():
     for pass_no in (2, 3):
         if ended:
             break
-        sweep = pick_sweep_candidates(partials, no_flags, wall_left(), pass_no)
+        sweep = pick_sweep_candidates(partials, no_flags, wall_left(), elapsed_map)
         if pass_no >= 3 and sweep:
             # D：第 3 轮决策基于第 2 轮实际解决率（自适应，不盲目重开）
             s2 = _RETRY_STATS.get(2, {"tried": 0, "solved": 0})

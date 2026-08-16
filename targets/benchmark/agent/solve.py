@@ -43,7 +43,10 @@ DEAD_PATH = os.path.join(WORKSPACE, "DEAD.md")
 RUNLOG_PATH = os.path.join(WORKSPACE, "run.log")   # 实时日志（容器内持久，跨会话可查/可下载）
 MAX_CONCURRENT = 3  # 平台容器并发上限
 READY_TIMEOUT = 90     # 容器启动就绪等待（秒）——30-90s 启动期探测全失败 = 轮次浪费
-TIME_LIMIT = {"easy": 600, "medium": 1200, "hard": 2400}  # 每题总时长上限（秒），超时强制 close
+# 每题总时长上限（秒）——按 6 小时总时限 × 3 并发 = 1080 worker-min 分配：
+#   第一轮 40 题最坏 8×5+15×15+30×20 = 865 min，sweep 余 215 min
+TIME_LIMIT = {"easy": 480, "medium": 900, "hard": 1800}
+TOTAL_TIME_LIMIT = int(os.environ.get("TASKS_TIME_LIMIT", 6 * 3600))  # 平台总解题时限（秒，默认 6h，可环境变量覆盖）
 HINT_ON_STALL = 2      # 连续 N 轮无进展后自动取平台 hint（扣分但保底破题，每题最多 1 次）
 
 # 日志缓冲（多线程并发写文件用列表 + 惰性刷新，避免每行都开文件句柄）
@@ -252,7 +255,14 @@ def submit_flag(unique_code, flag):
 
 
 def close_ch(unique_code):
-    return api(f"/openapi/v1/challenges/close?unique_code={unique_code}", "POST")
+    """关闭容器，失败重试 3 次——close 失败 = 容器泄漏占满并发上限，后续题全 start 失败。"""
+    for attempt in range(3):
+        code, payload = api(f"/openapi/v1/challenges/close?unique_code={unique_code}", "POST")
+        if code == 200:
+            return True
+        log(f"  close 重试 {attempt + 1}/3: [{code}] {payload}")
+        time.sleep(3 * (attempt + 1))
+    return False
 
 
 def http_req(method, url, headers=None, data=None, timeout=HTTP_TIMEOUT, max_body=4000):
@@ -851,6 +861,47 @@ def wait_ready(addr, timeout=READY_TIMEOUT):
     return False
 
 
+def pick_sweep_candidates(partials, no_flags, remaining, pass_no):
+    """时间感知 sweep 名单（模块级，可测）：partial 永远优先；no_flag 按 ROI 取前 K。
+    预算 = 剩余墙钟 × 3 并发（worker-min）；每题耗时上限随 pass 递减（/2）。"""
+    if remaining < 300:
+        return []  # 剩 <5 分钟不再 sweep
+    budget = remaining * 3 / 60  # worker-min
+    partial_codes = {p["unique_code"] for p in partials}
+    cands = list(partials) + list(no_flags)
+    cands = list({c["unique_code"]: c for c in cands}.values())
+    # partial 优先，其次单 flag 分值高者
+    cands.sort(key=lambda c: (c["unique_code"] not in partial_codes,
+                              -(c.get("total_score", 0) / max(c.get("flag_count", 1), 1))))
+    picked, cost = [], 0.0
+    for c in cands:
+        t = TIME_LIMIT.get(c.get("difficulty", "medium"), 900) / 2 / 60
+        if cost + t > budget:
+            break
+        picked.append(c)
+        cost += t
+    return picked
+
+
+def cleanup_workdir(workdir):
+    """清理 workdir 中大体积临时文件（APK/解包产物 >20MB），保留小脚本（可复用）。"""
+    try:
+        removed = 0
+        for root, _dirs, files in os.walk(workdir):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    if os.path.getsize(p) > 20 * 1024 * 1024:
+                        os.remove(p)
+                        removed += 1
+                except OSError:
+                    pass
+        if removed:
+            log(f"  已清理 {removed} 个大文件（>20MB）")
+    except OSError:
+        pass
+
+
 def fetch_hint(unique_code):
     """取平台 hint（扣分）。返回 hint 文本或 None。任何异常不阻塞主流程。"""
     try:
@@ -893,6 +944,8 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     t_start = time.time()
     type_key, _ = detect_type(desc, unique_code)
     time_budget = TIME_LIMIT.get(difficulty, 1800)
+    if pass_no > 1:
+        time_budget = max(240, time_budget // 2)  # sweep 轮预算减半
     enum_summary = []   # 阶段A/特化分支产出，喂给阶段B LLM
 
     def time_left():
@@ -1017,6 +1070,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     else:
         record_kb(unique_code, f"DEAD 无果（{difficulty}）: {desc[:60]} | 已试: {'; '.join(enum_summary)[:150]}（标记待重试）", dead=True)
 
+    cleanup_workdir(workdir)  # 清理大体积临时文件（APK/解包），防磁盘膨胀
     close_ch(unique_code)
     log(f"  容器已关闭，结果: {result}（{won}/{total_flags} flag，用时 {int(time.time()-t_start)}s）")
     return result, won, total_flags
@@ -1076,8 +1130,12 @@ def main():
         f"{[c['unique_code'] for c in pending[:12]]}（动态 ROI: 分/flag÷预估耗时）")
 
     stats = {"solved": 0, "partial": 0, "no_flag": 0, "failed": 0, "score": 0}
-    partials = []   # 部分得分题 → 第二轮 sweep（多 flag 拿全，得分率优先）
-    no_flags = []   # 无果题 → 第二轮 sweep 重开再打（容器稳定，重开大概率可解）
+    partials = []   # 部分得分题 → sweep（多 flag 拿全，得分率优先）
+    no_flags = []   # 无果题 → sweep 重开再打（容器稳定，重开大概率可解）
+    t_total_start = time.time()
+
+    def wall_left():
+        return TOTAL_TIME_LIMIT - (time.time() - t_total_start)
 
     def run_pass(chs, pass_no, extra_hint=None):
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as ex:
@@ -1097,29 +1155,32 @@ def main():
                 stats["score"] += int(ch.get("total_score", 0) * (won / total if total else 1))
                 if r == "partial":
                     partials.append(ch)
-                elif r == "no_flag":
+                elif r in ("no_flag", "failed"):
+                    # failed（异常）也重开再打——异常可能是一次性抖动
                     no_flags.append(ch)
                 log(f"({i}/{len(chs)} 本轮) {ch['unique_code']} → {r}（{won}/{total} flag）| 累计: {stats}")
         return False
 
     # 第一轮：全部待解题（并发 3 靶场）
+    log(f"▶ 第一轮：{len(pending)} 题（总时限 {TOTAL_TIME_LIMIT // 3600}h × {MAX_CONCURRENT} 并发）")
     ended = run_pass(pending, 1)
-    # 第二轮 sweep：PARTIAL（拿全剩余 flag）+ no_flag（重开再打，第一名对 f2 失败 5 次仍重试）
-    # 容器环境稳定——重开大概率同路径可解；带"上次已试方向"提示避免重复空转
-    sweep2 = partials + no_flags
-    if not ended and sweep2:
-        log(f"▶ 第二轮 sweep：{len(sweep2)} 道题（{len(partials)} PARTIAL + {len(no_flags)} 无果）重开再打")
+    # 时间感知 sweep：partial（拿全剩余 flag）+ no_flag（重开再打）——按剩余墙钟动态裁剪
+    for pass_no in (2, 3):
+        if ended:
+            break
+        sweep = pick_sweep_candidates(partials, no_flags, wall_left(), pass_no)
+        if not sweep:
+            log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟不足或名单为空，跳过第{['', '二', '三'][pass_no]}轮 sweep")
+            break
+        log(f"▶ 第{['', '二', '三'][pass_no]}轮 sweep：{len(sweep)} 道（partial 优先 + ROI 裁剪），"
+            f"剩余 {wall_left() / 60:.0f} 分钟")
         hint = ("该题上一轮未完全解出（部分得分或已尝试多轮）。容器已重置，"
-                "请按新环境重新枚举，重点换攻击面（不同漏洞类/端点/协议/账号）。")
-        ended = run_pass(sweep2, 2, hint)
-        if not ended:
-            # 第三轮：去重后仍未解的（每题最多 3 次 start，预算逐轮减半）
-            retry2 = list({c["unique_code"]: c for c in (partials + no_flags)}.values())
-            if retry2:
-                log(f"▶ 第三轮 sweep：{len(retry2)} 道仍有余量（最后机会）")
-                run_pass(retry2, 3, hint + " 若仍无进展，允许放弃该题。")
+                "请按新环境重新枚举，重点换攻击面（不同漏洞类/端点/协议/账号）。"
+                + (" 若仍无进展，允许放弃该题。" if pass_no >= 3 else ""))
+        ended = run_pass(sweep, pass_no, hint)
 
-    log(f"跑分结束: {stats}（PARTIAL 余量: {[c['unique_code'] for c in partials]}）")
+    log(f"跑分结束: {stats}（用时 {(time.time() - t_total_start) / 60:.0f} 分钟，"
+        f"PARTIAL 余量: {[c['unique_code'] for c in partials]}）")
     flush_log()
     sys.exit(0)
 

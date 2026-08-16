@@ -1048,6 +1048,27 @@ def build_playbook(kb_text, dead_text, desc, code):
     return PLAYBOOK + hints + extra
 
 
+def compact_history(history, round_i):
+    """重组轮：把全部历史注入（不只最近 10 条），早期条目去重压缩成摘要。
+    难题的关键线索（早期响应头/参数）不再被挤出上下文——让 LLM 退一步看全局。"""
+    if not history:
+        return history
+    if len(history) <= 40:
+        return history
+    early = history[:-20]  # 早期条目
+    late = history[-20:]   # 最近 20 条全量
+    seen = set()
+    early_compact = []
+    for h in early:
+        key = h[:60]
+        if key not in seen:
+            seen.add(key)
+            early_compact.append(h[:150])
+    # 重组提示：明确要求重新审视早期线索
+    return (["【重组轮·早期尝试回顾（已压缩，请重新审视这些早期发现，找出被遗漏的线索）】",
+             " | ".join(early_compact[:15])]) + late
+
+
 def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=None, extra_prompt=None, seen=None):
     """LLM 批量动作攻击循环。
     返回 (全部唯一 flag 列表, 会话记录, 动作统计)。
@@ -1070,7 +1091,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             f"工作目录: {workdir or '/tmp'}（把 python/shell 脚本保存到这里，后续轮次可复用）\n"
             + (f"补充要求: {extra_prompt}\n" if extra_prompt else "")
             + f"已收集信息（仅供参考，你可自行探测任何新方向/新端点/新思路，不受此清单限制）:\n"
-            + "\n".join(history[-10:]) + "\n"
+            + "\n".join(compact_history(history, i)) + "\n"
             '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）\n'
             '【输出格式（每轮必须遵守，这是模板）：\n'
             f'[{{"type":"bash","command":"curl -s {base_url}/"}},{{"type":"http","method":"GET","url":"{base_url}/robots.txt"}}]\n'
@@ -1566,6 +1587,12 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             no_progress_streak = max(0, no_progress_streak - 1)
         else:
             no_progress_streak += 1
+        # 难题持续借支：hard 题无进展时从时间池持续借（每轮最多借预算 30%），上限 90 分钟
+        if difficulty == "hard" and no_progress_streak >= 1 and time_budget < 5400:
+            extra_borrow = pool_borrow(time_budget * 0.3)
+            if extra_borrow > 60:
+                time_budget += extra_borrow
+                log(f"  ⏳ 难题持续借支 +{extra_borrow:.0f}s（预算 → {time_budget:.0f}s）")
             if (hint_text is None and no_progress_streak >= CONFIG["hint_on_stall"]
                     and switches >= CONFIG["stall_switch_limit"] and time_left() > 300
                     and difficulty != "easy"  # easy 题不用 hint（扣分性价比低）
@@ -1604,6 +1631,16 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     if remaining > 60 and pass_no == 1:
         pool_earn(remaining)
         log(f"  时间池 +{remaining * CONFIG['pool_save_ratio']:.0f}s（余量回池，池余 {pool_balance():.0f}s）")
+
+    # 难题事实传承：探索摘要写入 workdir/LAST_ATTEMPT.md（sweep 重开时注入——不从头摸索）
+    if result in ("no_flag", "partial"):
+        try:
+            with open(os.path.join(workdir, "LAST_ATTEMPT.md"), "w", encoding="utf-8") as f:
+                f.write(f"# 上次尝试（{time.strftime('%H:%M')}，结果 {result}，用时 {int(elapsed_sec)}s）\n")
+                f.write("已探索方向：\n" + "\n".join(str(x)[:200] for x in enum_summary[:8]) + "\n")
+                f.write("DEAD 方向（勿重复）：" + "; ".join(str(x)[:80] for x in rejected)[:300] + "\n")
+        except OSError:
+            pass
 
     cleanup_workdir(workdir)  # 清理大体积临时文件（APK/解包），防磁盘膨胀
     close_ch(unique_code)
@@ -1776,9 +1813,19 @@ def main():
                 break
         log(f"▶ 第{pass_no}轮 sweep：{len(sweep)} 道（partial 优先 + ROI + 类型成功率{min_rate:.0%}），"
             f"剩余 {wall_left() / 60:.0f} 分钟")
+        # 难题事实传承：注入上次探索摘要（不从头摸索——带着全部记忆重新推理）
+        last_facts = []
+        for c in sweep[:3]:
+            laf = os.path.join(WORKSPACE, c["unique_code"], "LAST_ATTEMPT.md")
+            try:
+                if os.path.isfile(laf):
+                    last_facts.append(f"【{c['unique_code']} 上次尝试】" + open(laf, encoding="utf-8").read()[:400])
+            except OSError:
+                pass
         hint = ("该题已多次尝试未解。容器已重置。请【彻底换一个攻击面】："
                 "换漏洞类（SQLi→SSTI→反序列化→逻辑→密码学→客户端）、换端点、换协议、换角色。"
                 "不要重复任何已尝试方向——仔细重新审视题目描述中的每个线索。"
+                + ("\n" + "\n".join(last_facts) if last_facts else "")
                 + (" 若仍无进展，允许放弃该题（最后机会）。" if wall_left() < 600 else ""))
         ended = run_pass(sweep, pass_no, hint)
         pass_no += 1

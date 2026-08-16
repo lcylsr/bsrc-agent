@@ -1049,7 +1049,10 @@ def build_playbook(kb_text, dead_text, desc, code):
 
 
 def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=None, extra_prompt=None, seen=None):
-    """LLM 批量动作攻击循环。返回 (全部唯一 flag 列表, 会话记录)。seen=跨阶段 URL 去重集合。"""
+    """LLM 批量动作攻击循环。
+    返回 (全部唯一 flag 列表, 会话记录, 动作统计)。
+    动作统计 {format_failures, actions_run} 供 solve_challenge 区分"格式失败/正在干活/真无进展"。
+    seen=跨阶段 URL 去重集合。"""
     history = [enum_summary] if enum_summary else []
     flags = []
     done = False
@@ -1057,6 +1060,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
     seen = seen if seen is not None else set()
     kb_text, dead_text = load_kb()
     sys_msg = build_playbook(kb_text, dead_text, desc, unique_code)
+    info = {"format_failures": 0, "actions_run": 0, "rounds_used": 0}
 
     last_raw = None  # 上一轮解析失败的原始输出（用于纠正反馈）
     for i in range(1, max_rounds + 1):
@@ -1068,8 +1072,10 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             + f"已收集信息（仅供参考，你可自行探测任何新方向/新端点/新思路，不受此清单限制）:\n"
             + "\n".join(history[-10:]) + "\n"
             '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）\n'
-            '【输出格式提醒（每轮必须遵守）：只输出一个 JSON 数组，形如 [{"type":"bash","command":"..."}]；'
-            '不要输出任何解释/计划/思考文本；不要用 ```json 包裹；不要输出多个裸对象。】'
+            '【输出格式（每轮必须遵守，这是模板）：\n'
+            '[{"type":"bash","command":"curl -s http://TARGET/"},{"type":"http","method":"GET","url":"http://TARGET/robots.txt"}]\n'
+            '只输出一个这样的 JSON 数组；不要输出任何解释/计划/思考文本；不要用 ```json 包裹；不要输出多个裸对象。】\n'
+            f'【脚本复用：workdir（{workdir}）下已有脚本用 ls 查看，可 import/直接调用，不要重复编写。】'
         )
         if done_confirmed:
             # E：LLM 上一轮提议放弃——二次确认轮，强制换思路
@@ -1086,6 +1092,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
         actions, raw = llm_actions([{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}])
         if actions is None:
             last_raw = (raw or "")[:500]
+            info["format_failures"] += 1
             history.append("[LLM 无有效输出，格式错误]")  # 供 solve_challenge 检测（hint 联动）
             log(f"  LLM 无有效输出 (轮 {i})，带纠正反馈重试")
             time.sleep(3)
@@ -1099,6 +1106,8 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
         new_round = []
         for act in actions[:5]:
             atype = act.get("type")
+            if atype in ("http", "tcp", "bash"):
+                info["actions_run"] += 1  # 实际执行的动作（正在干活 ≠ 无进展）
             if atype == "flag":
                 f = normalize_flag(act.get("flag", ""))
                 if f and "flag{" in f and f not in flags:
@@ -1168,7 +1177,8 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
         history.extend(new_round)
         if done:
             break
-    return flags, history
+    info["rounds_used"] = i  # 实际消耗的 LLM 调用轮数（格式失败提前 break 时不虚扣预算）
+    return flags, history, info
 
 
 # ─────────────── 单题求解 ───────────────
@@ -1539,13 +1549,21 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         if switches and no_progress_streak >= 1:
             # 换攻击面重试（前代教训：换类是继续，不是放弃——得分率优先）
             extra = (extra or "") + " 前一轮无新进展（没有提交到新 flag，重复旧结论无效）。请【换攻击面】继续：不同漏洞类 / 不同端点 / 不同协议 / 不同账号角色，明确不要重复已尝试方向。"
-        new_flags, _hist = llm_attack(unique_code, desc, base_url, "\n".join(enum_summary), min(rounds_left, 8), workdir, extra_prompt=extra, seen=seen)
-        rounds_left -= min(rounds_left, 8)
+        new_flags, _hist, _info = llm_attack(unique_code, desc, base_url, "\n".join(enum_summary), min(rounds_left, 8), workdir, extra_prompt=extra, seen=seen)
+        rounds_left -= min(rounds_left, _info.get("rounds_used", 8) or 8)  # 按实际消耗扣（格式失败不虚扣）
         before = won
         won += submit_all(unique_code, new_flags, submitted, rejected)
         if won > before:
             no_progress_streak = 0
             switches = 0  # 有进展重置
+        elif _info["format_failures"] > 0 and _info["actions_run"] == 0:
+            # 格式失败轮：不是思路问题，不计入无进展（给 LLM 机会继续输出）
+            no_progress_streak = max(0, no_progress_streak - 1)
+            log(f"  📋 本轮为格式失败（{_info['format_failures']} 次），不计入无进展")
+        elif _info["actions_run"] > 0:
+            # 正在干活（有动作执行）但没提交 flag：不视为无进展，但不重置（缓慢计数）
+            log(f"  🔧 本轮执行 {_info['actions_run']} 个动作（继续探索中）")
+            no_progress_streak = max(0, no_progress_streak - 1)
         else:
             no_progress_streak += 1
             if (hint_text is None and no_progress_streak >= CONFIG["hint_on_stall"]

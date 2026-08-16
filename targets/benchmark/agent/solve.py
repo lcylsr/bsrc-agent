@@ -71,6 +71,8 @@ CONFIG = {
     "retry_solved_lo": 0.1,       # 重开解决率 < 10% → 第 3 轮只 partial
     "start_backoff_base": 15,     # start 失败退避基数（指数）
     "max_concurrent": 3,          # 初始并发
+    "sweep_type_rate_min": 0.2,   # sweep 名单的题型最低解决率（低于则过滤——已知死路不重开）
+    "hard_future_timeout": 2700,  # 单题 future 硬超时兜底（秒）
 }
 try:
     _cfg_override = json.loads(os.environ.get("BENCHMARK_CFG", "{}"))
@@ -1235,10 +1237,15 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
                 flags_found.append(quick)
                 ok_cnt = submit_all(unique_code, flags_found, submitted, rejected)
                 if ok_cnt:
+                    q_elapsed = time.time() - t_start
+                    update_type_time(type_key, q_elapsed / 60)  # 快题也计入 EMA（否则该类型经验偏慢）
+                    remaining = time_budget - q_elapsed
+                    if remaining > 60:
+                        pool_earn(remaining)  # 快题剩余预算回池
                     close_ch(unique_code)
                     record_kb(unique_code, f"快路径端点命中（{difficulty}）", dead=False)
                     log(f"  容器已关闭，结果: solved（快路径 {ok_cnt} flag）")
-                    return "solved", ok_cnt, total_flags, int(time.time() - t_start)
+                    return "solved", ok_cnt, total_flags, int(q_elapsed)
 
     # ── 阶段A 自动化枚举（Web/云/沙箱；android 已处理则跳过） ──
     if unique_code.startswith("f1"):
@@ -1419,15 +1426,13 @@ def main():
         else:
             _PACE_MODE = "normal"
 
-    HARD_FUTURE_TIMEOUT = 2700  # 单题硬超时兜底（45min：预算 30min + 重开/就绪/下载余量）——防 worker 卡死拖垮全局
-
     def run_pass(chs, pass_no, extra_hint=None):
         with ThreadPoolExecutor(max_workers=max(1, _current_concurrent)) as ex:
             futs = {ex.submit(solve_challenge, ch, pass_no, extra_hint): ch for ch in chs}
             ch_of = {f: ch for f, ch in futs.items()}
             i = 0
             while futs:
-                done, futs = wait(futs, timeout=HARD_FUTURE_TIMEOUT, return_when=FIRST_COMPLETED)
+                done, futs = wait(futs, timeout=CONFIG["hard_future_timeout"], return_when=FIRST_COMPLETED)
                 if not done:
                     # future 硬超时（极端情况：solve_challenge 内部兜底全部失效）→ 取消并退出本轮
                     log("⚠ future 硬超时（45min），取消剩余任务")
@@ -1489,7 +1494,7 @@ def main():
                 log(f"  📊 上一轮重开解决率 {rate:.0%} → 本轮 no_flag 裁剪为前 50%")
             # 类型解决率过滤：低成功率的题型（如 f2 逆向）不重复重开（已知死路）
             sweep = [c for c in sweep if c["unique_code"] in {p["unique_code"] for p in partials}
-                     or type_solve_rate(c.get("description") or "", c.get("unique_code", "")) >= 0.2]
+                     or type_solve_rate(c.get("description") or "", c.get("unique_code", "")) >= CONFIG["sweep_type_rate_min"]]
         if not sweep:
             log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟不足或名单为空，跳过第{['', '二', '三'][pass_no - 1]}轮 sweep")
             break

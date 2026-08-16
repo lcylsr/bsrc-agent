@@ -1048,6 +1048,18 @@ def build_playbook(kb_text, dead_text, desc, code):
     return PLAYBOOK + hints + extra
 
 
+def _workdir_files(workdir):
+    """workdir 已有文件列表（主动注入，省 LLM 每轮 ls 浪费轮次）。"""
+    try:
+        if workdir and os.path.isdir(workdir):
+            files = sorted(f for f in os.listdir(workdir)
+                           if os.path.isfile(os.path.join(workdir, f)) and not f.startswith("LAST_ATTEMPT"))
+            return ", ".join(files[:10]) if files else "（无，可自行创建）"
+    except OSError:
+        pass
+    return "（无）"
+
+
 def compact_history(history):
     """重组轮：把全部历史注入（不只最近 10 条），早期条目去重压缩成摘要。
     难题的关键线索（早期响应头/参数）不再被挤出上下文——让 LLM 退一步看全局。"""
@@ -1061,8 +1073,14 @@ def compact_history(history):
     early_compact = []
     for h in early:
         key = h[:60]
-        if key not in seen:
-            seen.add(key)
+        if key in seen:
+            continue
+        seen.add(key)
+        # 关键模式行（具体值）全量保留——凭据/token/flag 等不容压缩
+        if any(p in h.lower() for p in ("flag", "token", "credential", "key=", "secret", "password",
+                                        "session", "authorization", "set-cookie", "jwt", "bearer")):
+            early_compact.append(h[:500])
+        else:
             early_compact.append(h[:150])
     # 重组提示：明确要求重新审视早期线索
     return (["【重组轮·早期尝试回顾（已压缩，请重新审视这些早期发现，找出被遗漏的线索）】",
@@ -1082,6 +1100,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
     kb_text, dead_text = load_kb()
     sys_msg = build_playbook(kb_text, dead_text, desc, unique_code)
     info = {"format_failures": 0, "actions_run": 0, "rounds_used": 0}
+    _host = base_url.split("//")[-1].split("/")[0] if "//" in base_url else base_url  # 模板例子用
 
     last_raw = None  # 上一轮解析失败的原始输出（用于纠正反馈）
     for i in range(1, max_rounds + 1):
@@ -1094,9 +1113,9 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             + "\n".join(compact_history(history)) + "\n"
             '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）\n'
             '【输出格式（每轮必须遵守，这是模板）：\n'
-            f'[{{"type":"bash","command":"curl -s {base_url}/"}},{{"type":"http","method":"GET","url":"{base_url}/robots.txt"}}]\n'
+            f'[{{"type":"bash","command":"curl -s {base_url}/"}},{{"type":"http","method":"GET","url":"{base_url}/robots.txt"}},{{"type":"http","method":"GET","url":"{base_url}/admin"}},{{"type":"bash","command":"nmap -p- {_host}"}}]\n'
             '只输出一个这样的 JSON 数组；不要输出任何解释/计划/思考文本；不要用 ```json 包裹；不要输出多个裸对象。】\n'
-            f'【脚本复用：workdir（{workdir}）下已有脚本用 ls 查看，可 import/直接调用，不要重复编写。】'
+            f'【脚本复用：workdir（{workdir}）已有文件 {_workdir_files(workdir)}——脚本直接 python3 执行，不要重复编写。】'
         )
         if done_confirmed:
             # E：LLM 上一轮提议放弃——二次确认轮，强制换思路
@@ -1125,7 +1144,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
         last_raw = None
 
         new_round = []
-        for act in actions[:5]:
+        for act in actions[:8]:  # 批量能力：每轮最多 8 个动作（原 5 个限制批量爆破/枚举）
             atype = act.get("type")
             if atype in ("http", "tcp", "bash"):
                 info["actions_run"] += 1  # 实际执行的动作（正在干活 ≠ 无进展）
@@ -1153,10 +1172,12 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
                 if not url.startswith("http"):
                     url = base_url + url
                 url = url.split("#")[0].rstrip("/")
-                if url in seen:  # 防重复请求（前代教训：同请求反复打=浪费轮次）
-                    new_round.append(f"[跳过重复] {url}")
+                # 去重键 = method + url + body 前 50 字符——POST 不同 payload 不误伤（弱口令爆破/SQLi 盲注）
+                req_key = f"{method}|{url}|{str(act.get('body') or '')[:50]}"
+                if req_key in seen:
+                    new_round.append(f"[跳过重复] {method} {url}")
                     continue
-                seen.add(url)
+                seen.add(req_key)
                 st, hd, body = http_req(method, url, act.get("headers") or None, act.get("body"))
                 new_round.append(f"[{method} {url}] -> HTTP {st}\n{body[:500]}")
                 for f in extract_flags(body):
@@ -1542,8 +1563,9 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             # service 模式（FTP/Redis/MySQL 等）：port_hint 是唯一引导，无条件注入
             enum_summary.insert(0, ph)
             log(f"  🎯 服务信号: {ph[:60]}...")
-        if pass_no == 1 and not tech_hints:
-            n_hits = nuclei_scan(base_url)
+        if pass_no == 1 and (not tech_hints or any(t in "".join(tech_hints) for t in ("GeoServer", "1Panel", "Grafana", "Jenkins", "Tomcat", "WordPress", "Dify"))):
+            # 指纹未命中 或 指纹命中产品类（可能有多个 CVE）→ nuclei 补扫（30s 限时）
+            n_hits = nuclei_scan(base_url, timeout=30)
             if n_hits:
                 enum_summary.append("nuclei 扫描：" + "; ".join(n_hits))
                 log(f"  🎯 nuclei 命中 {len(n_hits)} 个已知漏洞")
@@ -1557,7 +1579,8 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     hint_text = None         # 平台 hint 内容（每题最多取 1 次，扣分但保底破题）
     while rounds_left > 0 and (won < total_flags) and time_left() > 60:
         passes += 1
-        if passes > CONFIG["pass_limit"]:
+        # 轮次上限与时间联动：时间充足（>10min）放宽到 8 轮（难题深挖），时间紧保持 4 轮
+        if passes > (8 if time_left() > 600 else CONFIG["pass_limit"]):
             break  # 最多 4 轮循环（每轮 8 rounds；PARTIAL/no_flag 由 main sweep 兜底）
         extra = extra_hint if extra_hint else None
         if submitted:
@@ -1593,7 +1616,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             if extra_borrow > 60:
                 time_budget += extra_borrow
                 log(f"  ⏳ 难题持续借支 +{extra_borrow:.0f}s（预算 → {time_budget:.0f}s）")
-            if (hint_text is None and no_progress_streak >= CONFIG["hint_on_stall"]
+            if (hint_text is None and no_progress_streak >= (2 if difficulty == "hard" else CONFIG["hint_on_stall"])
                     and switches >= CONFIG["stall_switch_limit"] and time_left() > 300
                     and difficulty != "easy"  # easy 题不用 hint（扣分性价比低）
                     and sum(1 for h in _hist[-3:] if ("无有效输出" in h or "格式错误" in h)) < 2):  # 格式空转时不取（hint 白给）

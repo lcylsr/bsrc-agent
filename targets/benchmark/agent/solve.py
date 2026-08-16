@@ -1146,8 +1146,6 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
         new_round = []
         for act in actions[:8]:  # 批量能力：每轮最多 8 个动作（原 5 个限制批量爆破/枚举）
             atype = act.get("type")
-            if atype in ("http", "tcp", "bash"):
-                info["actions_run"] += 1  # 实际执行的动作（正在干活 ≠ 无进展）
             if atype == "flag":
                 f = normalize_flag(act.get("flag", ""))
                 if f and "flag{" in f and f not in flags:
@@ -1178,6 +1176,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
                     new_round.append(f"[跳过重复] {method} {url}")
                     continue
                 seen.add(req_key)
+                info["actions_run"] += 1  # 实际执行（跳过的不计）
                 st, hd, body = http_req(method, url, act.get("headers") or None, act.get("body"))
                 new_round.append(f"[{method} {url}] -> HTTP {st}\n{body[:500]}")
                 for f in extract_flags(body):
@@ -1194,6 +1193,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
                 port = act.get("port", 0)
                 lines = act.get("lines") or [act.get("line", "")]
                 if host and port:
+                    info["actions_run"] += 1
                     resp = tcp_req(host, port, lines)
                     new_round.append(f"[TCP {host}:{port} <<{';'.join(lines)[:60]}>>\n{resp[:500]}")
                     for f in extract_flags(resp):
@@ -1206,6 +1206,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             elif atype == "bash":
                 cmd = act.get("command", "")
                 if cmd:
+                    info["actions_run"] += 1
                     resp = bash_req(cmd, act.get("cwd") or workdir)
                     new_round.append(f"[bash] {cmd[:120]}\n{resp[:800]}")
                     for f in extract_flags(resp):
@@ -1489,8 +1490,9 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     # ── 阶段A0 快路径：低开销端点命中即交（HTTP 模式专属） ──
     if mode == "http" and not unique_code.startswith("f1") and not unique_code.startswith("f2"):
         # 快路径探测过的 URL 全部计入 seen → 阶段B LLM 不再重复请求（省 LLM 轮次）
+        # 注意：seen 去重键格式为 method|url|body——预填必须同格式（否则防重失效）
         for p in FLAG_PATHS:
-            seen.add(base_url + p)
+            seen.add(f"GET|{base_url + p}|")
         if type_key == "android":
             # android 题：容器首页是 APK 附件，跳过文本端点探测，预下载 APK 供 LLM 分析（大小限制防磁盘爆）
             apk_path = os.path.join(workdir, "app.apk")

@@ -1354,7 +1354,8 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             time_budget += extra_pool
             log(f"  ⏳ 借时间池 {extra_pool:.0f}s（池余 {pool_balance():.0f}s）")
     if pass_no > 1:
-        time_budget = max(240, time_budget // 2)  # sweep 轮预算减半
+        # sweep 轮预算随轮次递减（pass2=1/2、pass3=1/3、pass4=1/4...）——持续战斗但逐轮收敛
+        time_budget = max(180, int(time_budget * (1.0 / pass_no)))
     enum_summary = []   # 阶段A/特化分支产出，喂给阶段B LLM
 
     def time_left():
@@ -1721,13 +1722,13 @@ def main():
     # 第一轮：全部待解题（动态并发）
     log(f"▶ 第一轮：{len(pending)} 题（总时限 {TOTAL_TIME_LIMIT // 3600}h × {_current_concurrent} 并发）")
     ended = run_pass(pending, 1)
-    # 时间感知 sweep：partial（拿全剩余 flag）+ no_flag（重开再打）——按剩余墙钟动态裁剪
-    for pass_no in (2, 3):
-        if ended:
-            break
+    # ── 时间驱动持续战斗（核心修复：6h 用满，反复分析解题直到时间耗尽）──
+    # 每轮：名单智能裁剪 → 预算递减 → 轮次递增；pass 4+ 放宽类型过滤，pass 6 全量重扫
+    pass_no = 2
+    while not ended and wall_left() > CONFIG["sweep_min_remaining"] and pass_no <= 8:
         sweep = pick_sweep_candidates(partials, no_flags, wall_left(), elapsed_map)
         if sweep:
-            # D 决策提前到 pass 2：基于上一轮实际解决率（自适应，不盲目重开）
+            # D 决策：基于上一轮实际解决率（自适应，不盲目重开）
             prev = pass_no - 1
             sp = _RETRY_STATS.get(prev, {"tried": 0, "solved": 0})
             rate = sp["solved"] / sp["tried"] if sp["tried"] else 1.0
@@ -1738,18 +1739,30 @@ def main():
                 non_partial = [c for c in sweep if c["unique_code"] not in {p["unique_code"] for p in partials}]
                 sweep = list(partials) + non_partial[:max(1, len(non_partial) // 2)]
                 log(f"  📊 上一轮重开解决率 {rate:.0%} → 本轮 no_flag 裁剪为前 50%")
-            # 类型解决率过滤：低成功率的题型（如 f2 逆向）不重复重开（已知死路）
+            # 类型解决率过滤：低成功率题型不重复重开；pass 4+ 放宽（死磕阶段），pass 6 不过滤（全量重扫）
+            if pass_no <= 3:
+                min_rate = CONFIG["sweep_type_rate_min"]
+            elif pass_no <= 5:
+                min_rate = max(0.05, CONFIG["sweep_type_rate_min"] / 2)
+            else:
+                min_rate = 0.0  # 最后阶段全量重扫（换思路最后一搏）
             sweep = [c for c in sweep if c["unique_code"] in {p["unique_code"] for p in partials}
-                     or type_solve_rate(c.get("description") or "", c.get("unique_code", "")) >= CONFIG["sweep_type_rate_min"]]
+                     or type_solve_rate(c.get("description") or "", c.get("unique_code", "")) >= min_rate]
         if not sweep:
-            log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟不足或名单为空，跳过第{['', '二', '三'][pass_no - 1]}轮 sweep")
-            break
-        log(f"▶ 第{['', '二', '三'][pass_no - 1]}轮 sweep：{len(sweep)} 道（partial 优先 + ROI + 类型成功率），"
+            log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟但名单为空（全部过滤/已解），"
+                f"最后阶段全量重扫 {len(no_flags)} 道")
+            if pass_no >= 6 and no_flags and wall_left() > 1200:
+                sweep = list({c["unique_code"]: c for c in no_flags}.values())[:6]  # 每轮最多 6 道重扫
+            else:
+                break
+        log(f"▶ 第{pass_no}轮 sweep：{len(sweep)} 道（partial 优先 + ROI + 类型成功率{min_rate:.0%}），"
             f"剩余 {wall_left() / 60:.0f} 分钟")
-        hint = ("该题上一轮未完全解出（部分得分或已尝试多轮）。容器已重置，"
-                "请按新环境重新枚举，重点换攻击面（不同漏洞类/端点/协议/账号）。"
-                + (" 若仍无进展，允许放弃该题。" if pass_no >= 3 else ""))
+        hint = ("该题已多次尝试未解。容器已重置。请【彻底换一个攻击面】："
+                "换漏洞类（SQLi→SSTI→反序列化→逻辑→密码学→客户端）、换端点、换协议、换角色。"
+                "不要重复任何已尝试方向——仔细重新审视题目描述中的每个线索。"
+                + (" 若仍无进展，允许放弃该题。" if pass_no >= 7 else ""))
         ended = run_pass(sweep, pass_no, hint)
+        pass_no += 1
 
     log(f"跑分结束: {stats}（用时 {(time.time() - t_total_start) / 60:.0f} 分钟，"
         f"PARTIAL 余量: {[c['unique_code'] for c in partials]}）")

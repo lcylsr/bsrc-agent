@@ -1073,7 +1073,7 @@ def llm_attack(unique_code, desc, base_url, enum_summary, max_rounds, workdir=No
             + "\n".join(history[-10:]) + "\n"
             '（如无更多可尝试的方向，输出 [{"type":"done","reason":"..."}]）\n'
             '【输出格式（每轮必须遵守，这是模板）：\n'
-            '[{"type":"bash","command":"curl -s http://TARGET/"},{"type":"http","method":"GET","url":"http://TARGET/robots.txt"}]\n'
+            f'[{{"type":"bash","command":"curl -s {base_url}/"}},{{"type":"http","method":"GET","url":"{base_url}/robots.txt"}}]\n'
             '只输出一个这样的 JSON 数组；不要输出任何解释/计划/思考文本；不要用 ```json 包裹；不要输出多个裸对象。】\n'
             f'【脚本复用：workdir（{workdir}）下已有脚本用 ls 查看，可 import/直接调用，不要重复编写。】'
         )
@@ -1768,8 +1768,9 @@ def main():
                      or type_solve_rate(c.get("description") or "", c.get("unique_code", "")) >= min_rate]
         if not sweep:
             log(f"  ⏱ 剩余 {wall_left() / 60:.0f} 分钟但名单为空（全部过滤/已解），"
-                f"最后阶段全量重扫 {len(no_flags)} 道")
-            if pass_no >= 6 and no_flags and wall_left() > 1200:
+                f"全量重扫 {len(no_flags)} 道")
+            # 名单空 ≠ 提前结束：只要剩 >20 分钟就全量重扫（持续战斗直到时间耗尽）
+            if no_flags and wall_left() > 1200:
                 sweep = list({c["unique_code"]: c for c in no_flags}.values())[:6]  # 每轮最多 6 道重扫
             else:
                 break
@@ -1778,7 +1779,7 @@ def main():
         hint = ("该题已多次尝试未解。容器已重置。请【彻底换一个攻击面】："
                 "换漏洞类（SQLi→SSTI→反序列化→逻辑→密码学→客户端）、换端点、换协议、换角色。"
                 "不要重复任何已尝试方向——仔细重新审视题目描述中的每个线索。"
-                + (" 若仍无进展，允许放弃该题。" if pass_no >= 7 else ""))
+                + (" 若仍无进展，允许放弃该题（最后机会）。" if wall_left() < 600 else ""))
         ended = run_pass(sweep, pass_no, hint)
         pass_no += 1
 

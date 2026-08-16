@@ -99,7 +99,8 @@ bash tools/run.sh benchmark-watch --interval 5   # 5s 一刷（--once 单次快�
 
 # 托管镜像（上传平台后容器内自动解题）
 cd targets/benchmark/agent && bash build.sh      # 构建 agent.tar.gz 上传
-#   镜像内自动：ROI 队列 → 快路径端点 → 跨题 KB → 并发 3 靶场 → 多 flag 循环 → PARTIAL sweep
+#   镜像内自动（v17）：黑盒三模路由（端口/协议/指纹）→ 快路径+枚举 → 指纹 hints → nuclei 补扫
+#   → LLM 8 动作/轮 × 三态分离 × 全历史重组 × 持续借支 → 6h 时间驱动 sweep（带记忆重开）
 #   日志双写 /app/workspace/run.log（可下载查看）
 
 # 本地直接驱动平台 API
@@ -107,10 +108,12 @@ bash tools/run.sh benchmark-api list             # 题目清单 + 作答进度
 bash tools/run.sh benchmark-api start <code>     # 启动靶场（并发 ≤3）
 ```
 
-跑分模式三大机制（首轮 2250 分 → 对标榜单第一 22340 分机制拆解后的 v3.1 改进）：
-1. **得分率优先**：换类不换题（无进展触发换攻击面重试）、部分得分题第二轮 sweep 拿全剩余 flag
-2. **跨题经验库**：KB.md（中标打法）/ DEAD.md（死路）注入 LLM，兄弟题复用
-3. **快路径 + 实时可见**：16 个低开销端点命中即交；watch 终端实时监控每题进度
+跑分引擎核心机制（多轮实战迭代，实测 7145 → 6850 分基线持续演进）：
+1. **黑盒纯探测驱动**：端口号（901x=内存安全/910x=逆向/21/23/6379/3306=服务专项）→ 协议探测（HTTP/TCP/SSH-banner）→ 20 类技术栈指纹（GeoServer/1Panel/Sanic/Spring 等）→ .git 源码泄露信号 → nuclei 已知 CVE 补扫
+2. **得分率优先**：换类不换题、多 flag 拿全、FLAG 大小写变体自动尝试、hint 保底（hard 2 轮即取）
+3. **让 AI 发挥完全**：格式失败/正在干活/真无进展三态分离（不误伤）、预算按实际消耗、重组轮（全历史+早期线索回顾）、LAST_ATTEMPT 事实传承、难题持续借支（90min 上限）、6h 时间驱动持续战斗
+4. **自适应**：题型耗时 EMA 回喂 ROI/预算、节奏模式 tight/loose、重开成功率学习、类型解决率过滤
+5. **防御体系**：宽容 JSON 解析（多裸对象/代码块/长命令）、网关冷却降级、容器重开、future 硬超时、磁盘清理、时间池（防套利）
 
 ## 五、脱敏声明（重要）
 

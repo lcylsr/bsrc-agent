@@ -1400,10 +1400,12 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
         time_budget *= (1 - CONFIG["pace_scale"])
     elif _PACE_MODE == "loose":
         time_budget *= (1 + CONFIG["pace_scale"])
+    borrowed_total = 0.0  # 累计借支（回池时减去——防时间池套利）
     if pass_no == 1 and difficulty == "hard":
         extra_pool = pool_borrow(time_budget)  # 难题第一轮可借池子时间（最多自身 50%）
         if extra_pool > 60:
             time_budget += extra_pool
+            borrowed_total += extra_pool
             log(f"  ⏳ 借时间池 {extra_pool:.0f}s（池余 {pool_balance():.0f}s）")
     if pass_no > 1:
         # sweep 轮预算随轮次递减（pass2=1/2、pass3=1/3、pass4=1/4...）——持续战斗但逐轮收敛
@@ -1615,6 +1617,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             extra_borrow = pool_borrow(time_budget * 0.3)
             if extra_borrow > 60:
                 time_budget += extra_borrow
+                borrowed_total += extra_borrow
                 log(f"  ⏳ 难题持续借支 +{extra_borrow:.0f}s（预算 → {time_budget:.0f}s）")
             if (hint_text is None and no_progress_streak >= (2 if difficulty == "hard" else CONFIG["hint_on_stall"])
                     and switches >= CONFIG["stall_switch_limit"] and time_left() > 300
@@ -1649,9 +1652,9 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
 
     elapsed_sec = time.time() - t_start
     update_type_time(type_key, elapsed_sec / 60)  # A：实际耗时回喂经验库（无论解出与否）
-    # 时间池：剩余预算回池（快题省下的时间给难题）
-    remaining = time_budget - elapsed_sec
-    if remaining > 60 and pass_no == 1:
+    # 时间池：剩余预算回池（快题省下的时间给难题）——减去借支额；秒解题（<60s）不回池（没花时间≠节省）
+    remaining = time_budget - elapsed_sec - borrowed_total
+    if remaining > 60 and pass_no == 1 and elapsed_sec > 60:
         pool_earn(remaining)
         log(f"  时间池 +{remaining * CONFIG['pool_save_ratio']:.0f}s（余量回池，池余 {pool_balance():.0f}s）")
 

@@ -92,6 +92,7 @@ _PACE_MODE = "normal"        # C：tight / normal / loose（main 更新，solve_
 _ADAPT_LOCK = threading.Lock()
 _current_concurrent = CONFIG["max_concurrent"]   # F：动态并发（连续 start 失败降级）
 _GATEWAY_DOWN_UNTIL = 0.0    # 双网关都失败后的冷却截止时间（防每轮都试浪费）
+_UNKNOWN_PROTO_STREAK = 0    # 连续协议探测失败计数（批量模式识别：黑盒可能全是 TCP/特殊服务）
 
 
 def update_type_solve(desc, code, solved):
@@ -703,6 +704,34 @@ def port_hint(addr):
     return ""
 
 
+def mode_by_port(addr):
+    """黑盒模式路由：端口即信号 → 返回 'http' / 'tcp_memsafe' / 'reverse' / 'service'。"""
+    ph = port_hint(addr)
+    if "内存安全" in ph:
+        return "tcp_memsafe"
+    if "嵌入式授权" in ph or "序列号" in ph:
+        return "reverse"
+    if ph and ("FTP" in ph or "Telnet" in ph or "Redis" in ph or "MySQL" in ph or "面板" in ph):
+        return "service"
+    return "http"
+
+
+def detect_protocol(base_url, addr):
+    """黑盒协议探测：HTTP 首页探测失败 → TCP 行协议 HELP 探测 → 判定协议类型。"""
+    st, hd, body = http_req("GET", base_url + "/", timeout=5, max_body=2000)
+    if st and st != 0:
+        return "http"
+    host, _, port = addr.partition(":")
+    try:
+        p = int(port or 80)
+    except ValueError:
+        p = 80
+    resp = tcp_req(host, p, ["HELP", "STATUS", ""], timeout=5)
+    if resp and "无响应" not in resp and "错误" not in resp and "TCP 错误" not in resp:
+        return "tcp"
+    return "unknown"
+
+
 def fingerprint_tech(base_url):
     """黑盒第一探测：首页 + 常见指纹路径 → 返回技术栈 hint 列表（去重）。"""
     hints = []
@@ -718,6 +747,13 @@ def fingerprint_tech(base_url):
     for pat, key, hint in TECH_FINGERPRINT:
         if pat in blob_all:
             hints.append(hint)
+    # 动态信号：源码泄露（.git/HEAD 单独探测——URL 不在响应体里）
+    try:
+        st_g, _hd_g, body_g = http_req("GET", base_url + "/.git/HEAD", timeout=4, max_body=500)
+        if st_g == 200 and "ref:" in (body_g or ""):
+            hints.append("发现 /.git/HEAD（源码泄露）→ git 工具 dump 源码（git log/git show/checkout）找硬编码凭据、密钥与 flag")
+    except Exception:
+        pass
     return hints
 
 
@@ -1345,8 +1381,40 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
     workdir = f"{WORKSPACE}/{unique_code}"
     os.makedirs(workdir, exist_ok=True)
 
-    # ── 阶段A0 快路径：低开销端点命中即交（e1/d 系 5-60s 秒杀的来源） ──
-    if not unique_code.startswith("f1") and not unique_code.startswith("f2"):
+    # ── 黑盒模式路由（灵活性核心：端口/协议探测 → 流程动态分支） ──
+    if unique_code.startswith("f1"):
+        mode = "tcp_memsafe"   # 已知编码前缀（兼容旧平台）
+    elif unique_code.startswith("f2"):
+        mode = "reverse"
+    else:
+        mode = mode_by_port(addr)
+        if mode == "http":
+            mode = detect_protocol(base_url, addr)  # HTTP 失败 → TCP/unknown
+    if mode in ("tcp", "tcp_memsafe"):
+        host, _, port = addr.partition(":")
+        enum_summary = [f"该容器是 TCP 行协议服务（{host}:{port}），不是 Web 服务。"
+                        f"使用 tcp 动作交互：先 HELP/STATUS 摸协议命令，再攻击"
+                        f"（超长输入/负数长度/格式串/心跳长度不匹配/缓存逻辑缺陷）。"]
+        log(f"  🎯 模式: TCP 行协议（黑盒协议探测）")
+        mode = "tcp"
+    elif mode == "reverse":
+        enum_summary = [f"该容器是嵌入式授权/序列号校验服务（{addr}）。"
+                        f"用 bash 下载二进制（curl 首页/描述路径）→ file/strings/objdump -d/gdb/ltrace 分析校验逻辑 → z3 求解。"]
+        log(f"  🎯 模式: 二进制逆向（黑盒端口信号）")
+        mode = "reverse"
+    else:
+        # 批量失败模式识别：连续 N 题协议探测失败 → 提示黑盒可能全是非 HTTP 服务
+        global _UNKNOWN_PROTO_STREAK
+        if mode == "unknown":
+            _UNKNOWN_PROTO_STREAK += 1
+            if _UNKNOWN_PROTO_STREAK >= 3:
+                log(f"  ⚠ 连续 {_UNKNOWN_PROTO_STREAK} 题协议探测失败——黑盒可能以 TCP/特殊服务为主，"
+                    f"后续题先探测协议再决定流程")
+        else:
+            _UNKNOWN_PROTO_STREAK = 0
+
+    # ── 阶段A0 快路径：低开销端点命中即交（HTTP 模式专属） ──
+    if mode == "http" and not unique_code.startswith("f1") and not unique_code.startswith("f2"):
         # 快路径探测过的 URL 全部计入 seen → 阶段B LLM 不再重复请求（省 LLM 轮次）
         for p in FLAG_PATHS:
             seen.add(base_url + p)
@@ -1410,7 +1478,7 @@ def solve_challenge(ch, pass_no=1, extra_hint=None):
             submit_all(unique_code, flags_found, submitted, rejected)
 
     # ── 黑盒增强：指纹 → 技术栈 hints + 端口信号 + nuclei 已知 CVE（无描述时替代 detect_type） ──
-    if not enum_summary or "技术栈指纹命中" not in "".join(enum_summary):
+    if mode == "http" and (not enum_summary or "技术栈指纹命中" not in "".join(enum_summary)):
         tech_hints = fingerprint_tech(base_url)
         if tech_hints:
             enum_summary.insert(0, "技术栈指纹命中：\n" + "\n".join(tech_hints))
